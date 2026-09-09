@@ -19,6 +19,11 @@ pub enum DatastoreError {
     OfflineMiss { key: ArtifactKey },
     #[error("{key} is not cached and the mirror is unreachable ({reason}); set STARFIELD_ALLOW_UPSTREAM=1 to fetch from the archive")]
     MirrorUnreachable { key: ArtifactKey, reason: String },
+    #[error("{key} is not cached and has no sources; obtain it manually: {instructions}")]
+    ManualRequired {
+        key: ArtifactKey,
+        instructions: String,
+    },
     #[error("all {} sources failed for {key}: {}", .attempts.len(), .attempts.join("; "))]
     AllSourcesFailed {
         key: ArtifactKey,
