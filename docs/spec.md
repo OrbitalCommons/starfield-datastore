@@ -153,6 +153,9 @@ Release conditions:
 /// the mirror object path, or anyone's pinned digest.
 ///
 /// Slash-separated, no leading slash, no `..`. e.g. "naif/spk/de440.bsp".
+/// ASCII alphanumerics and `-._/` only; no empty, `.` or `..` component;
+/// at most 1024 bytes. The key is also the index path and the mirror
+/// object path, so it must be safe as both.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ArtifactKey(String);
 
@@ -164,7 +167,10 @@ impl ArtifactKey {
 }
 
 /// Where to obtain an artifact upstream.
-#[derive(Debug, Clone)]
+/// `Debug` prints the URL redacted: a source may be a signed URL whose
+/// query string is a bearer capability. Userinfo in a URL is rejected
+/// outright; credentials come from a `CredentialProvider`.
+#[derive(Clone)]
 pub struct Source {
     pub url: String,
     /// Forward credentials across redirects. Required for Earthdata URS.
@@ -189,6 +195,9 @@ pub struct Provenance {
 #[derive(Debug, Clone)]
 pub struct Artifact {
     pub key: ArtifactKey,
+    /// May be empty: an artifact that must be obtained by hand (an
+    /// ECOSTRESS granule ordered from a portal) is `import`ed, and a miss
+    /// on it fails with `ManualRequired` carrying `provenance.description`.
     pub sources: Vec<Source>,
     pub check: ContentCheck,
     pub freshness: Freshness,
@@ -240,6 +249,13 @@ impl ContentCheck {
     /// they exist.
     pub fn default_binary() -> Self;
     pub fn check(&self, bytes: &[u8]) -> std::result::Result<(), CheckFailure>;
+    /// Streaming: built-in checks read only what they need; `Custom` alone
+    /// loads the whole file.
+    pub fn check_file(&self, path: &Path) -> std::result::Result<(), CheckFailure>;
+    /// Decide what can be decided from the leading bytes (`NotHtml`,
+    /// `Magic`), so a login page is rejected before 12 GB of it arrive. A
+    /// head too short to decide passes; `check_file` is authoritative.
+    pub fn check_prefix(&self, head: &[u8]) -> std::result::Result<(), CheckFailure>;
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +267,12 @@ pub struct CheckFailure {
     pub got: String,
 }
 ```
+
+The store shows the first 8 KB of every transfer to `check_prefix` before
+letting the rest of the body in, then runs `check_file` on the completed
+temp file. `Sha256` nodes are compared against the digest computed while
+streaming rather than rehashed; every `Sha256` in the tree must match, so
+two conflicting pins can never pass.
 
 `Custom` holds a closure, so `ContentCheck` does not derive `Debug`,
 `PartialEq` or `Serialize`. `Debug` is hand-written and prints
@@ -307,6 +329,7 @@ an artifact needs them.
 ```rust
 /// A secret that cannot be logged by accident.
 /// No Debug/Display that reveals the value, no Serialize, zeroed on drop.
+#[derive(Clone)]
 pub struct Secret(/* private */);
 
 impl Secret {
@@ -320,7 +343,6 @@ impl std::fmt::Debug for Secret { /* writes "Secret([redacted])" */ }
 pub enum Credential {
     Basic { user: String, secret: Secret },
     Bearer { secret: Secret, expires_at: Option<SystemTime> },
-    AwsSigV4 { access_key: String, secret: Secret, region: String },
 }
 
 pub trait CredentialProvider: Send + Sync {
@@ -330,17 +352,29 @@ pub trait CredentialProvider: Send + Sync {
     fn identity_for(&self, host: &str) -> Option<String>;
 }
 
-pub struct NetrcProvider;          // ~/.netrc — what Earthdata URS wants
-pub struct EnvProvider;            // STARFIELD_TOKEN_<HOST>
-pub struct OnePasswordProvider { pub item: String }   // `op read`, never to disk
-pub struct AwsProvider;            // standard AWS chain, for the S3 mirror
+pub struct NetrcProvider;          // ~/.netrc (mode 0600; `default` ignored)
+pub struct EnvProvider;            // STARFIELD_TOKEN_<HOST>, bearer
+pub struct OnePasswordProvider { pub item: String }   // `op read op://…/<host>`, never to disk
 pub struct StaticProvider(pub HashMap<String, Credential>);  // tests
 pub struct ChainProvider(pub Vec<Box<dyn CredentialProvider>>);
 ```
 
+`EnvProvider` maps a host to a variable by uppercasing it and replacing every
+non-alphanumeric with `_`: `urs.earthdata.nasa.gov` reads
+`STARFIELD_TOKEN_URS_EARTHDATA_NASA_GOV`. `NetrcProvider` refuses a
+world-readable file and ignores a `default` entry, so a credential can never
+be sent to a host nobody named.
+
+S3 is not a `Credential`. The mirror's writer identity comes from the
+standard AWS chain inside `S3Mirror` and is never modelled here; there is no
+`AwsSigV4` variant and no `AwsProvider`.
+
 Where they run: the provider chain is **server-side configuration**. Clients
-need no provider at all on the tailnet, and only their own archive credentials
-under `STARFIELD_ALLOW_UPSTREAM`.
+need no provider at all on the tailnet. Under `STARFIELD_ALLOW_UPSTREAM` a
+client fetches with its own credentials: `DatastoreBuilder::from_env`
+installs `Chain(Env, Netrc[, OnePassword])` when nothing explicit was set,
+every provider looks up lazily per request, and a plain `Datastore::builder()`
+installs nothing.
 
 Rules the implementation must hold, all testable:
 
@@ -357,6 +391,17 @@ Rules the implementation must hold, all testable:
 5. A `Bearer` credential may carry an expiry (Earthdata tokens last ~60 days,
    MAST tokens likewise). `CredentialRejected` reports whether the credential
    looked expired, so the fix is obvious.
+6. Redirects are followed by hand (never by the HTTP client) so rules 2 and
+   4 apply per hop: each hop uses the credential held for *its own* host;
+   with `trust_redirects` the original source's credential is additionally
+   forwarded to a hop whose host has none. Every hop's URL is re-validated —
+   no userinfo, `http(s)` only, no `https` → `http` downgrade — and at most
+   ten hops are followed.
+7. The mirror client runs the same engine with **no provider and no cookie
+   jar**, so nothing the ephemeris server sets can ride along on the
+   presigned redirect it issues. The upstream engine keeps a per-host cookie
+   jar: Earthdata authorises the final hop with a cookie set two redirects
+   earlier.
 
 ## 7. The store
 
@@ -377,27 +422,64 @@ impl Datastore {
     pub fn peek(&self, key: &ArtifactKey) -> Option<PathBuf>;
     /// Read fully into memory. For small artifacts only.
     pub fn get_bytes(&self, artifact: &Artifact) -> Result<Vec<u8>>;
+    /// Seed the cache from a file already on disk — a legacy flat cache, a
+    /// granule obtained by hand — validated exactly as a download would be.
+    /// Copies; never moves.
+    pub fn import(&self, artifact: &Artifact, path: &Path) -> Result<PathBuf>;
 
     pub fn contains(&self, key: &ArtifactKey) -> bool;
+    /// The index sidecar, if cached.
+    pub fn entry(&self, key: &ArtifactKey) -> Option<IndexEntry>;
     pub fn remove(&self, key: &ArtifactKey) -> Result<()>;
     pub fn keys(&self) -> Result<Vec<ArtifactKey>>;
+    /// Every blob on disk, orphans included; shared blobs count once.
     pub fn total_bytes(&self) -> Result<u64>;
     /// Rehash every blob; report keys whose content no longer matches.
     pub fn verify(&self) -> Result<Vec<VerifyFailure>>;
+    /// Reclaim orphan blobs, then evict least-recently-fetched keys until
+    /// the store is within the budget. Never runs implicitly.
+    pub fn gc(&self, max_bytes: u64) -> Result<Vec<ArtifactKey>>;
+    pub fn cache_root(&self) -> &Path;
+    pub fn max_bytes(&self) -> Option<u64>;
 }
 
 impl DatastoreBuilder {
+    /// Pre-filled from env and the config file; later calls override.
+    pub fn from_env() -> Result<Self>;
     pub fn cache_root(self, path: PathBuf) -> Self;
     pub fn mirror(self, mirror: Mirror) -> Self;
+    /// Drop a mirror picked up from the environment. The server uses this
+    /// so it never resolves through itself.
+    pub fn without_mirror(self) -> Self;
     pub fn credentials(self, provider: Box<dyn CredentialProvider>) -> Self;
     /// Permit the upstream layer. Default false; see §2.4.
     pub fn allow_upstream(self, allow: bool) -> Self;
     /// Disable layers 2 and 3. What CI sets once the mirror is warm.
     pub fn offline(self, offline: bool) -> Self;
+    /// Connect timeout only. There is no read or total timeout: a 12 GB
+    /// mosaic takes as long as it takes.
     pub fn timeout(self, timeout: Duration) -> Self;
     pub fn progress(self, enabled: bool) -> Self;
+    /// `(received, total)` per chunk, instead of bars.
+    pub fn on_progress(self, callback: Box<dyn Fn(u64, Option<u64>) + Send + Sync>) -> Self;
+    /// Advisory budget; applied only by an explicit `gc`.
+    pub fn max_bytes(self, max: u64) -> Self;
     pub fn build(self) -> Result<Datastore>;
 }
+
+/// The index sidecar (§12). Records a provider *identity*, never a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexEntry {
+    pub digest: String,            // lowercase hex SHA-256; the blob's address
+    pub bytes: u64,
+    pub fetched_at: u64,           // Unix seconds
+    pub source: Option<String>,    // sanitised origin+path, mirror location, or "local:import"
+    pub etag: Option<String>,
+    pub provider_identity: Option<String>,
+    pub layer: Layer,
+}
+
+pub struct VerifyFailure { pub key: ArtifactKey, pub expected: String, pub actual: Option<String> }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Layer { LocalDisk, Mirror, Upstream }
@@ -431,7 +513,40 @@ Resolution order and the three modes:
 | `offline` | local | CI once the cache is warm |
 
 A miss in default mode with the mirror unreachable fails with
-`MirrorUnreachable`, which names `STARFIELD_ALLOW_UPSTREAM`.
+`MirrorUnreachable`, which names `STARFIELD_ALLOW_UPSTREAM` and carries the
+reason (connection refused, the server's own error text, "no mirror
+configured", or "has no entry").
+
+Invariants the store holds:
+
+- **The chain never writes a mirror.** `Mirror::*::writable` is
+  informational; a client's upstream fill populates local disk only. The
+  ephemeris server uploads explicitly after its own `get`.
+- **A hit is re-verified.** `get` on a cached key checks the file length
+  against the sidecar, rehashes the blob, and re-runs the artifact's check.
+  A mismatch is `ContentRejected` naming the corruption and stays an error
+  until `verify` and an explicit `remove` or repair; nothing is silently
+  refetched. `peek` and `entry` never rehash. (Rehashing every hit costs a
+  read of the file; an mtime/verified-handle shortcut is a later decision.)
+- **A moved pin is a miss.** If the artifact's `Sha256` no longer matches
+  the cached digest the store fetches afresh; the old blob becomes an orphan
+  reclaimed by the next `gc`, so a path handed out earlier stays valid.
+- **Publication fails closed.** A blob already at the target address that no
+  longer hashes to it is never overwritten by an ordinary download or
+  import; the caller gets `ContentRejected` and `verify` names every key
+  that references it.
+- **One fetch per key per host.** A per-key advisory lock serialises
+  concurrent `get`s across processes; the losers find a hit. A store-wide
+  lock, always taken after the key lock, makes blob publication atomic with
+  respect to `remove`/`gc` reference scans.
+- **`gc` is the only eviction.** `STARFIELD_CACHE_MAX` is a default for the
+  CLI's `gc`, not a trigger. Orphans go first; then keys, oldest
+  `fetched_at` first. `tmp/` is never touched: a temp file's age proves
+  nothing about whether its transfer is still running.
+- **Single-source errors are verbatim.** With one source,
+  `ContentRejected`, `NoCredential` and `CredentialRejected` surface as
+  themselves; everything else, and every multi-source failure, aggregates
+  into `AllSourcesFailed`.
 
 ## 8. Errors
 
@@ -446,18 +561,26 @@ pub enum DatastoreError {
     ContentRejected { key: ArtifactKey, failure: CheckFailure },
     #[error("offline, and {key} is not in the local cache")]
     OfflineMiss { key: ArtifactKey },
-    #[error("{key} is not cached and the mirror is unreachable; set STARFIELD_ALLOW_UPSTREAM=1 to fetch from the archive")]
-    MirrorUnreachable { key: ArtifactKey },
-    #[error("all {} sources failed for {key}", .attempts.len())]
+    #[error("{key} is not cached and the mirror is unreachable ({reason}); set STARFIELD_ALLOW_UPSTREAM=1 to fetch from the archive")]
+    MirrorUnreachable { key: ArtifactKey, reason: String },
+    #[error("{key} is not cached and has no sources; obtain it manually: {instructions}")]
+    ManualRequired { key: ArtifactKey, instructions: String },
+    #[error("all {} sources failed for {key}: {}", .attempts.len(), .attempts.join("; "))]
     AllSourcesFailed { key: ArtifactKey, attempts: Vec<String> },
     #[error("invalid artifact key: {0}")]
     InvalidKey(String),
     #[error("mirror error: {0}")]
     Mirror(String),
+    #[error("configuration error: {0}")]
+    Config(String),
+    #[error("manifest error: {0}")]
+    Manifest(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Http(#[from] reqwest::Error),
+    /// The URL is stripped from the wrapped error: a presigned URL is a
+    /// bearer capability and must not end up in a log line.
+    #[error("HTTP request failed")]
+    Http(#[source] reqwest::Error),
 }
 
 pub type Result<T> = std::result::Result<T, DatastoreError>;
@@ -491,6 +614,22 @@ impl Manifest {
 }
 ```
 
+Manifest shapes, all round-tripped and fail-closed on unknown fields:
+
+| Field | Forms |
+|---|---|
+| `sources` | `["https://…"]` or `[{ url = "https://…", trust_redirects = true }]`; may be empty; userinfo and non-`http(s)` rejected |
+| `sha256` | top level, optional; parsed as `All([Sha256, check])` and written back the same way |
+| `check` | `{ none = true }` · `{ not_html = true }` · `{ min_bytes = N }` · `{ sha256 = "…" }` · `{ magic = ["DAF/SPK", [255, 0]], trim_leading_whitespace = false }` · `{ all = […] }`; `"none"` / `"not-html"` accepted on input; default `default_binary()` |
+| `bytes` | `expected_bytes`; a mismatch is a rejection like any other pin |
+| `freshness` | `"immutable"` only |
+
+`Manifest::pin_sha256(key, digest)` is idempotent and refuses to replace a
+different existing pin; `merge` replaces matching keys in place and appends
+new ones. Errors name the key or the TOML line and column, never a source
+line (a signed URL in a manifest is already a mistake, and echoing it would
+be a second one).
+
 **Digests are aspirational, not mandatory.** Most of these products publish no
 checksum and computing one means downloading ~25 GB. Ship `magic` /
 `NotHtml` / `MinBytes` immediately for everything; promote an artifact to
@@ -521,18 +660,75 @@ the loser's work harmless.
 `verify --repair` is always explicit. Silently re-fetching on a digest
 mismatch would hide a real problem.
 
+Two more commands exist because the boundary needs an escape hatch:
+`import --manifest M --key K --from PATH` seeds the cache from a file on
+disk, validated like a download; `remove --key K` drops one key, which is
+how an operator clears a corrupt blob that `verify` reports under an alias
+the manifest does not know.
+
+### 10.1 The server
+
+`serve --manifest M --bucket s3://bucket/prefix --bind ADDR`. `ADDR` must be
+loopback or a Tailscale address (`100.64/10`, `fd7a:115c:a1e0::/48`); a
+public bind is refused. The store it resolves with is built from the
+environment with the mirror removed (`without_mirror`) and upstream allowed,
+so the server never resolves through itself.
+
+| Request | Response |
+|---|---|
+| `GET /artifact/<key>`, key in manifest, object in S3 | `302 Location: <presigned GET, 5 min>`, `Cache-Control: no-store`, `X-Artifact-Sha256`, `X-Artifact-Bytes` |
+| … object not in S3 | `Datastore::get` on a blocking thread, then an explicit `S3Mirror::put`, then as above |
+| … S3 metadata disagrees with the manifest's pins or size | `422` naming `verify --at … --repair` |
+| … upstream or credential failure | `502` with the `DatastoreError` text |
+| key not in manifest, or malformed | `404` |
+| `GET /healthz` | `200` |
+
+Work is bounded by a semaphore of eight blocking fills; the runtime is the
+server's own, and `Datastore` is only ever called through `spawn_blocking`
+(`Runtime::block_on` inside an async context panics). Shutdown is graceful
+on `SIGINT` and `SIGTERM`. Artifacts without a `license` are refused: the
+server is redistributing.
+
+### 10.2 The S3 layout
+
+Objects live under logical keys — `<prefix>/<key>`, exactly
+`ArtifactKey::mirror_path` — not under content addresses. The digest,
+size, sanitised source, provider identity and fetch time are object
+metadata (`x-amz-meta-sha256`, `-bytes`, `-source`, `-provider-identity`,
+`-fetched-at`). A presign is therefore a function of the key alone, the
+bucket is browsable, and `verify --at` can read metadata without a
+download. It still downloads: **a HEAD is not a verification**; `verify
+--at` hashes every body.
+
+Writes are conditional (`If-None-Match: *`); a `412` after a race is
+resolved by a HEAD and accepted only if the existing digest and size match.
+Objects over 64 MiB go up multipart with a CRC32 composite checksum and
+per-part checksums on completion, which carries the same precondition; a
+failed upload is aborted. Repair is `replace(key, path, meta, etag)` with
+`If-Match` on the ETag the verifier observed. `S3Mirror` owns a private
+tokio runtime; its API is synchronous and leaks no tokio types.
+
 ## 11. Configuration
 
 Resolved from: explicit builder call, then env, then
 `~/.config/starfield/datastore.toml`, then defaults.
 
-| Setting | Env | Default |
-|---|---|---|
-| Cache root | `STARFIELD_CACHE_DIR` | `~/.cache/starfield` |
-| Mirror | `STARFIELD_MIRROR` | none (the org config sets the ephemeris server URL) |
-| Allow upstream | `STARFIELD_ALLOW_UPSTREAM` | false |
-| Offline | `STARFIELD_OFFLINE` | false |
-| Max cache bytes | `STARFIELD_CACHE_MAX` | unbounded |
+| Setting | Env | File key | Default |
+|---|---|---|---|
+| Cache root | `STARFIELD_CACHE_DIR` | `cache_dir` | `$XDG_CACHE_HOME/starfield` or `~/.cache/starfield` |
+| Mirror | `STARFIELD_MIRROR` (`https://…` or `s3://bucket/prefix`) | `mirror` | none (the org config sets the ephemeris server URL) |
+| Mirror region | `STARFIELD_MIRROR_REGION`, else `AWS_REGION` | `mirror_region` | required for `s3://` |
+| Allow upstream | `STARFIELD_ALLOW_UPSTREAM` | `allow_upstream` | false |
+| Offline | `STARFIELD_OFFLINE` | `offline` | false |
+| Max cache bytes | `STARFIELD_CACHE_MAX` | `cache_max` | unbounded; used only by `gc` |
+| Config file | `STARFIELD_DATASTORE_CONFIG` | — | `$XDG_CONFIG_HOME/starfield/datastore.toml` |
+| 1Password item | `STARFIELD_OP_ITEM` | — | none (feature `onepassword`) |
+
+Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`; anything else is a
+`Config` error, as is an unknown key in the file. Precedence is realised by
+`DatastoreBuilder::from_env()`: it fills every field the caller has not set
+from env, then file; calls made on the returned builder override both.
+`Datastore::builder()` reads nothing and is what tests use.
 
 The cache root stays `~/.cache/starfield`, shared with the existing
 `data::downloader`, so nobody re-downloads 114 MB on the day of the switch.
@@ -542,10 +738,17 @@ The cache root stays `~/.cache/starfield`, shared with the existing
 ```
 ~/.cache/starfield/
   blobs/<aa>/<sha256>          # content-addressed, immutable once written
-  index/<key path>.json        # { digest, bytes, fetched_at, source, etag, provider_identity }
-  tmp/                         # in-flight; temp + fsync + rename
-  locks/<key hash>.lock        # advisory, so two processes do not both pull 12 GB
+  index/<key path>.json        # { digest, bytes, fetched_at, source, etag, provider_identity, layer }
+  tmp/                         # in-flight; temp + fsync + rename, then the directory is fsynced
+  locks/<sha256(key)>.lock     # advisory, so two processes do not both pull 12 GB
+  locks/.store.lock            # store-wide; publication vs. reference scans, taken after a key lock
 ```
+
+A sidecar whose digest is not 64 lowercase hex characters is a corrupt
+sidecar, reported as an I/O error, never used as a path. `fetched_at` is
+Unix seconds. `source` is the sanitised origin and path (never a query
+string), the mirror location (`https://…/artifact/<key>` or
+`s3://bucket/prefix/<key>`), or `local:import`.
 
 Content addressing gives dedup, atomic publication, free integrity checking
 and safe concurrent fetch. Blobs are written to `tmp/`, validated, then
@@ -560,6 +763,8 @@ same artifact both end at the same final path.
 | `mirror-s3` | no | `aws-sdk-s3` and presigning; heavy, so opt-in (the server) |
 | `onepassword` | no | `op` CLI provider |
 | `progress` | yes | `indicatif` bars |
+| `cli` | no | `clap`; the `starfield-datastore` binary without S3 |
+| `server` | no | `cli` + `mirror-s3` + `axum`/`tokio`; adds `serve` |
 
 ## 14. Testing rules
 
@@ -583,6 +788,8 @@ same artifact both end at the same final path.
   validation, local-only fill under `STARFIELD_ALLOW_UPSTREAM`). focalplane's
   CI runs on plain GitHub-hosted runners with no tailnet and resolves every
   artifact this way, including large kernels and mosaic tiers.
+- **`verify --at s3://…` downloads and hashes every object.** Metadata is
+  what the writer said; only the body is what the reader gets.
 - **A cache hit and an upstream fetch are byte-identical by construction**, and
   a test says so: blobs are stored under their SHA-256, a manifest `sha256` is
   verified on every layer, and `verify` rehashes the local store. Consumers
@@ -628,3 +835,18 @@ Each step independently useful.
 | 2026-09-09 | Off-tailnet: opt-in `STARFIELD_ALLOW_UPSTREAM=1`; no public-read bucket; not strict. |
 | 2026-09-09 | Step 5 covers `Loader` and the datasources downloaders; live rot tests stay upstream-direct. |
 | 2026-09-09 | `Immutable` only at first; `verify --repair` always explicit. |
+| 2026-09-09 | Implementation split across two sessions: core (primitives, providers, manifests, S3, CLI, server, CI) and store (fetch engine, local layer, resolution chain, config, spec). Every PR cross-reviewed before merge; CI green is a hard gate. |
+| 2026-09-09 | Sync public API. `S3Mirror` owns a private tokio runtime; the server calls `Datastore` only through `spawn_blocking`. |
+| 2026-09-09 | Redirects followed by hand, per-hop credential lookup, every hop re-validated, no `https`→`http` downgrade. Mirror engine has no provider and no cookie jar; upstream engine keeps a cookie jar for Earthdata. |
+| 2026-09-09 | `Credential::AwsSigV4` and `AwsProvider` removed: S3 uses the native AWS chain inside `S3Mirror`. |
+| 2026-09-09 | The chain never writes a mirror; the server uploads explicitly after `get`. `writable` is informational. |
+| 2026-09-09 | S3 layout is logical keys with digest/size/source metadata, conditional puts, multipart with CRC32 composite checksums, `If-Match` repair. HEAD is not a verification. |
+| 2026-09-09 | A cache hit is rehashed and re-validated on every `get` for the first release; corruption is an error until explicit repair; a moved pin is a miss. Optimisation deferred. |
+| 2026-09-09 | Publication fails closed on a corrupt blob at the same address; no self-heal. |
+| 2026-09-09 | `gc` is explicit only, reclaims orphans then oldest keys, never touches `tmp/`. `STARFIELD_CACHE_MAX` is a default for the CLI, not a trigger. Leases for held paths deferred. |
+| 2026-09-09 | `import` added for validated local seeding (legacy caches, manually obtained granules); `ManualRequired` carries `provenance.description`. |
+| 2026-09-09 | Early rejection: the first 8 KB of every transfer go through `check_prefix` before the rest is accepted. |
+| 2026-09-09 | `from_env` installs the caller's own credential chain (env, netrc, optional 1Password via `STARFIELD_OP_ITEM`); `builder()` installs nothing. |
+| 2026-09-09 | `ContentCheck::custom` is code-only; manifests express the declarative set. `{ none = true }` is the spelled opt-out. |
+| 2026-09-09 | Timeouts: connect only. No read or total timeout. |
+| 2026-09-09 | Deferred, recorded: resumable `Range` downloads; leases protecting held paths from `gc`; hit-verification shortcuts. Not chosen: weakening TLS for any archive (the NSA archive's broken chain stays a documented escape hatch in `starfield-datasources`). |
