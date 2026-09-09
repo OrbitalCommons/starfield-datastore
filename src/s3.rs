@@ -84,6 +84,22 @@ impl S3Mirror {
         self.runtime.as_ref().expect("runtime exists until drop")
     }
 
+    fn service_error(
+        &self,
+        key: &ArtifactKey,
+        operation: &str,
+        code: Option<&str>,
+    ) -> DatastoreError {
+        let code = code
+            .filter(|s| s.len() < 80 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .unwrap_or("request failed");
+        DatastoreError::Mirror(format!(
+            "S3 {operation} s3://{}/{}: {code}",
+            self.bucket,
+            key.mirror_path(&self.prefix)
+        ))
+    }
+
     pub fn head(&self, key: &ArtifactKey) -> Result<Option<MirrorObject>> {
         self.runtime().block_on(self.head_async(key))
     }
@@ -113,7 +129,8 @@ impl S3Mirror {
                 {
                     Ok(None)
                 }
-                Err(error) => Err(service_error(
+                Err(error) => Err(self.service_error(
+                    key,
                     "HEAD repair precondition",
                     error
                         .as_service_error()
@@ -167,7 +184,8 @@ impl S3Mirror {
             {
                 Ok(None)
             }
-            Err(error) => Err(service_error(
+            Err(error) => Err(self.service_error(
+                key,
                 "HEAD",
                 error
                     .as_service_error()
@@ -197,7 +215,8 @@ impl S3Mirror {
                     return Ok(false)
                 }
                 Err(error) => {
-                    return Err(service_error(
+                    return Err(self.service_error(
+                        key,
                         "GET",
                         error
                             .as_service_error()
@@ -311,7 +330,8 @@ impl S3Mirror {
                         if status == Some(409) && attempt < 2 {
                             continue;
                         }
-                        return Err(service_error(
+                        return Err(self.service_error(
+                            key,
                             "PUT",
                             error
                                 .as_service_error()
@@ -355,7 +375,8 @@ impl S3Mirror {
             .send()
             .await
             .map_err(|e| {
-                service_error(
+                self.service_error(
+                    key,
                     "CreateMultipartUpload",
                     e.as_service_error().and_then(ProvideErrorMetadata::code),
                 )
@@ -390,7 +411,8 @@ impl S3Mirror {
                     .send()
                     .await
                     .map_err(|e| {
-                        service_error(
+                        self.service_error(
+                            key,
                             "UploadPart",
                             e.as_service_error().and_then(ProvideErrorMetadata::code),
                         )
@@ -436,7 +458,8 @@ impl S3Mirror {
                 {
                     self.existing_after_race(key, meta).await
                 }
-                Err(error) => Err(service_error(
+                Err(error) => Err(self.service_error(
+                    key,
                     "CompleteMultipartUpload",
                     error
                         .as_service_error()
@@ -478,13 +501,6 @@ impl crate::mirror::MirrorRead for S3Mirror {
 
 fn mirror_error(message: &str) -> DatastoreError {
     DatastoreError::Mirror(message.into())
-}
-fn service_error(operation: &str, code: Option<&str>) -> DatastoreError {
-    // Service messages and request URLs can carry bearer capabilities.
-    let code = code
-        .filter(|s| s.len() < 80 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
-        .unwrap_or("request failed");
-    DatastoreError::Mirror(format!("S3 {operation}: {code}"))
 }
 fn validate_digest(digest: &str) -> Result<()> {
     if digest.len() != 64
