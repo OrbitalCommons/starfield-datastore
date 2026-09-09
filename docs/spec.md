@@ -479,7 +479,14 @@ pub struct IndexEntry {
     pub layer: Layer,
 }
 
-pub struct VerifyFailure { pub key: ArtifactKey, pub expected: String, pub actual: Option<String> }
+/// `verify` reports exactly what `get` would refuse: a missing blob, a
+/// digest mismatch, or a size that disagrees with the sidecar.
+pub struct VerifyFailure {
+    pub key: ArtifactKey,
+    pub expected: String,        // digest the index records
+    pub actual: Option<String>,  // digest the blob hashes to; None if missing
+    pub reason: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Layer { LocalDisk, Mirror, Upstream }
