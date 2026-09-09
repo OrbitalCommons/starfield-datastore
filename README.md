@@ -77,6 +77,7 @@ features are `mirror-http` and `progress`; AWS dependencies are opt-in.
 starfield-datastore fetch --manifest manifests/ephemeris.toml --key naif/spk/de421.bsp
 starfield-datastore import --manifest manifest.toml --key manual/library --from library.dat
 starfield-datastore list --bytes
+starfield-datastore remove --key manual/library
 starfield-datastore verify --manifest manifests/ephemeris.toml
 starfield-datastore gc --max-bytes 1000000000
 
@@ -99,7 +100,7 @@ remain within the tailnet.
 
 Upstream credentials come from host-specific `STARFIELD_TOKEN_<HOST>` variables
 (uppercase host with punctuation replaced by underscores), `~/.netrc`, or the
-optional `onepassword` provider. `STARFIELD_ONEPASSWORD_ITEM=op://vault/item`
+optional `onepassword` provider. `STARFIELD_OP_ITEM=op://vault/item`
 selects an item whose fields are named for archive hosts. S3 uses the native
 AWS credential chain, including session credentials. Source URLs cannot embed
 userinfo. Redirect targets are validated; credential forwarding requires an

@@ -171,8 +171,17 @@ pub fn serve(
         .build()?;
     runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind(bind).await?;
+        #[cfg(unix)]
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         axum::serve(listener, router(service))
-            .with_graceful_shutdown(async {
+            .with_graceful_shutdown(async move {
+                #[cfg(unix)]
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    _ = terminate.recv() => {},
+                }
+                #[cfg(not(unix))]
                 let _ = tokio::signal::ctrl_c().await;
             })
             .await?;

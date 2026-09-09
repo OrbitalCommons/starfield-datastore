@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 use starfield_datastore::{
-    ArtifactKey, ChainProvider, Datastore, DatastoreBuilder, DatastoreError, EnvProvider, Manifest,
-    NetrcProvider, Result,
+    ArtifactKey, Datastore, DatastoreBuilder, DatastoreError, Manifest, Result,
 };
 use std::path::PathBuf;
 #[cfg(feature = "mirror-s3")]
@@ -16,6 +15,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Remove a key explicitly, including references blocking shared-blob repair.
+    Remove {
+        #[arg(long)]
+        key: String,
+    },
     /// Resolve an artifact into the local cache.
     Fetch {
         #[arg(long)]
@@ -84,23 +88,9 @@ fn main() {
     }
 }
 
-fn configured_builder() -> Result<DatastoreBuilder> {
-    let providers: Vec<Box<dyn starfield_datastore::CredentialProvider>> =
-        vec![Box::new(EnvProvider), Box::new(NetrcProvider)];
-    #[cfg(feature = "onepassword")]
-    let providers = {
-        let mut providers = providers;
-        if let Ok(item) = std::env::var("STARFIELD_ONEPASSWORD_ITEM") {
-            providers.push(Box::new(starfield_datastore::OnePasswordProvider { item }));
-        }
-        providers
-    };
-    Ok(DatastoreBuilder::from_env()?.credentials(Box::new(ChainProvider(providers))))
-}
-
 #[cfg(feature = "mirror-s3")]
 fn upstream_store() -> Result<Datastore> {
-    configured_builder()?
+    DatastoreBuilder::from_env()?
         .without_mirror()
         .allow_upstream(true)
         .offline(false)
@@ -109,6 +99,9 @@ fn upstream_store() -> Result<Datastore> {
 
 fn run(args: Args) -> Result<()> {
     match args.command {
+        Command::Remove { key } => {
+            Datastore::from_env()?.remove(&ArtifactKey::new(key)?)?;
+        }
         Command::Fetch { manifest, key } => {
             let manifest = Manifest::from_path(&manifest)?;
             let key = ArtifactKey::new(key)?;
@@ -117,7 +110,10 @@ fn run(args: Args) -> Result<()> {
                 .ok_or_else(|| DatastoreError::Manifest(format!("unknown artifact {key}")))?;
             println!(
                 "{}",
-                configured_builder()?.build()?.get(artifact)?.display()
+                DatastoreBuilder::from_env()?
+                    .build()?
+                    .get(artifact)?
+                    .display()
             );
         }
         Command::Import {
@@ -132,7 +128,7 @@ fn run(args: Args) -> Result<()> {
                 .ok_or_else(|| DatastoreError::Manifest(format!("unknown artifact {key}")))?;
             println!(
                 "{}",
-                configured_builder()?
+                DatastoreBuilder::from_env()?
                     .build()?
                     .import(artifact, &from)?
                     .display()
@@ -206,7 +202,7 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn verify_local(manifest: &Manifest, repair: bool) -> Result<()> {
-    let store = configured_builder()?.offline(true).build()?;
+    let store = DatastoreBuilder::from_env()?.offline(true).build()?;
     let mut failed = Vec::new();
     for artifact in &manifest.artifacts {
         match store.get(artifact) {
@@ -220,6 +216,24 @@ fn verify_local(manifest: &Manifest, repair: bool) -> Result<()> {
     if failed.is_empty() {
         return Ok(());
     }
+    let outside = store
+        .verify()?
+        .into_iter()
+        .filter(|failure| manifest.get(&failure.key).is_none())
+        .collect::<Vec<_>>();
+    for failure in &outside {
+        eprintln!("{failure}");
+    }
+    if repair && !outside.is_empty() {
+        return Err(DatastoreError::Config(format!(
+            "corrupt entries outside the manifest need explicit remove --key before repair: {}",
+            outside
+                .iter()
+                .map(|f| f.key.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
     if !repair {
         return Err(DatastoreError::Config(format!(
             "verification failed for {} artifacts; use --repair to refetch explicitly",
@@ -231,7 +245,7 @@ fn verify_local(manifest: &Manifest, repair: bool) -> Result<()> {
     for artifact in &failed {
         store.remove(&artifact.key)?;
     }
-    let store = configured_builder()?.build()?;
+    let store = DatastoreBuilder::from_env()?.build()?;
     for artifact in failed {
         store.get(artifact)?;
         println!("repaired {}", artifact.key);
