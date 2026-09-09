@@ -121,10 +121,10 @@ them in an asynchronous application.
 
 ## Relationship to `starfield`
 
-This crate **never depends on `starfield`**; `starfield` depends on it, behind
-a default-on `datastore` feature, and builds the SPICE-kernel content checks
-from its own constants. `starfield-datasources` and `focalplane` depend on it
-directly, by crates.io version — never by git rev.
+This crate **never depends on `starfield`**. The planned consumer integration
+adds a default-on `datastore` feature to `starfield`, which builds SPICE-kernel
+content checks from its own constants. Consumer repositories use crates.io
+versions, never git revisions; their rollout is tracked separately.
 
 ## Development
 
