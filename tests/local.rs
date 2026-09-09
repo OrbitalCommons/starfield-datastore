@@ -152,3 +152,37 @@ fn gc_reclaims_orphan_blobs_but_never_touches_temp_files() {
     assert_eq!(store.total_bytes().unwrap(), 1000);
     assert!(store.contains(&kept.key));
 }
+
+#[test]
+fn verify_reports_exactly_what_get_refuses() {
+    let root = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let store = builder(&root).build().unwrap();
+    let a = artifact("sized");
+    let path = store.import(&a, &seed(&files, "a", &[5u8; 700])).unwrap();
+    assert!(store.verify().unwrap().is_empty());
+
+    let index = root.path().join("index/local/sized.json");
+    let text = std::fs::read_to_string(&index).unwrap();
+    std::fs::write(&index, text.replace("\"bytes\": 700", "\"bytes\": 701")).unwrap();
+    let failures = store.verify().unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].key, a.key);
+    assert!(failures[0].reason.contains("700 bytes"), "{}", failures[0]);
+    assert!(
+        matches!(
+            store.get(&a),
+            Err(starfield_datastore::DatastoreError::ContentRejected { .. })
+        ),
+        "get refuses the same entry verify reports"
+    );
+
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&path, perms).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let failures = store.verify().unwrap();
+    assert_eq!(failures[0].actual, None);
+    assert!(failures[0].reason.contains("missing"), "{}", failures[0]);
+}

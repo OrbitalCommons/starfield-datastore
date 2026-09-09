@@ -1,0 +1,19 @@
+[Unit]
+Description=starfield mirror pre-warm (batch, writes digest pins back to the manifest)
+Documentation=https://github.com/OrbitalCommons/starfield-datastore/blob/main/docs/deploy.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=starfield
+Group=starfield
+EnvironmentFile=/etc/starfield-datastore/env
+ExecStart=/usr/local/bin/starfield-datastore mirror \
+  --manifest /etc/starfield-datastore/ephemeris.toml \
+  --to ${STARFIELD_BUCKET} \
+  --region ${AWS_REGION}
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/starfield-datastore /etc/starfield-datastore

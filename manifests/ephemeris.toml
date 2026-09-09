@@ -1,0 +1,71 @@
+# The SPICE kernels starfield needs (spec §15, step 5). Keys are archive-shaped
+# and stable; sources are where the bytes live today. `sha256` pins were taken
+# from a validated fetch of every artifact on 2026-09-09; `starfield-datastore
+# mirror` keeps them current.
+#
+# Checks reject the wrong kind of thing (an HTML page under a .bsp key); the
+# kernel parser validates the format. DAF ID words sit at bytes 0..8, so the
+# binary checks do not trim; text kernels may open with blank lines, so those
+# do. `NAIF/DAF` is the pre-N0052 ID word still found in archived kernels.
+
+[[artifact]]
+key = "naif/spk/de421.bsp"
+sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/a_old_versions/de421.bsp"]
+sha256 = "08b20db2ae22488650641c5a9033e5bfda4b1c4b440cfeaf20f621cfa18ecdb3"
+bytes = 16790528
+freshness = "immutable"
+check = { magic = ["DAF/SPK", "NAIF/DAF"], trim_leading_whitespace = false }
+description = "JPL DE421 planetary and lunar ephemeris, 1900-2050 (NAIF generic kernels)"
+license = "public-domain"
+citation = "Folkner, W. M., Williams, J. G., Boggs, D. H. (2009). The Planetary and Lunar Ephemeris DE 421. IPN Progress Report 42-178."
+
+[[artifact]]
+key = "naif/spk/de440.bsp"
+sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440.bsp"]
+sha256 = "a4ce9bf9b3282becc9f4b2ac3cebe03a2ae7599981aabd7265fd8482fff7c4b5"
+bytes = 119799808
+freshness = "immutable"
+check = { magic = ["DAF/SPK", "NAIF/DAF"], trim_leading_whitespace = false }
+description = "JPL DE440 planetary and lunar ephemeris, 1550-2650 (NAIF generic kernels)"
+license = "public-domain"
+citation = "Park, R. S., Folkner, W. M., Williams, J. G., Boggs, D. H. (2021). The JPL Planetary and Lunar Ephemerides DE440 and DE441. AJ 161:105."
+
+[[artifact]]
+key = "naif/pck/pck00011.tpc"
+sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/pck00011.tpc"]
+sha256 = "3dff7b1dbeceaa01f25467767d3fa25816051c85d162d1edf04acb310ee28bb1"
+bytes = 131226
+freshness = "immutable"
+check = { magic = ["KPL/PCK", "KPL/FK"], trim_leading_whitespace = true }
+description = "NAIF text PCK: IAU 2015 body orientation and shape constants"
+license = "public-domain"
+
+[[artifact]]
+key = "naif/pck/moon_pa_de421_1900-2050.bpc"
+sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/moon_pa_de421_1900-2050.bpc"]
+sha256 = "656f90616403d75a75f0cd6c8830fc5b44f8cb4facb5ccb8915e752b397520cf"
+bytes = 1770496
+freshness = "immutable"
+check = { magic = ["DAF/PCK", "NAIF/DAF"], trim_leading_whitespace = false }
+description = "Binary PCK: lunar principal-axis orientation from DE421, 1900-2050"
+license = "public-domain"
+
+[[artifact]]
+key = "naif/fk/moon_080317.tf"
+sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/fk/satellites/moon_080317.tf"]
+sha256 = "78732477b96f9863e7b0d65bcee3c22b8707ca5ed0db56d1173319cb2e8c7993"
+bytes = 21437
+freshness = "immutable"
+check = { magic = ["KPL/PCK", "KPL/FK"], trim_leading_whitespace = true }
+description = "Lunar frame kernel: MOON_PA and MOON_ME frame definitions"
+license = "public-domain"
+
+[[artifact]]
+key = "naif/lsk/naif0012.tls"
+sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/lsk/naif0012.tls"]
+sha256 = "678e32bdb5a744117a467cd9601cd6b373f0e9bc9bbde1371d5eee39600a039b"
+bytes = 5257
+freshness = "immutable"
+check = { magic = ["KPL/LSK"], trim_leading_whitespace = true }
+description = "NAIF leap seconds kernel (through 2017-01-01)"
+license = "public-domain"
