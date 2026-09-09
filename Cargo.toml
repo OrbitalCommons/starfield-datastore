@@ -1,0 +1,12 @@
+[package]
+name = "starfield-datastore"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Pull-through artifact cache with fail-closed validation, an S3 mirror served by presigned redirect, and a credential model that keeps upstream secrets in one place"
+repository = "https://github.com/OrbitalCommons/starfield-datastore"
+readme = "README.md"
+keywords = ["cache", "artifacts", "s3", "mirror", "astronomy"]
+categories = ["caching", "filesystem"]
+
+[dependencies]
