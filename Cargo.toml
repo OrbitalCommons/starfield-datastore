@@ -1,6 +1,6 @@
 [package]
 name = "starfield-datastore"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Pull-through artifact cache with fail-closed validation, an S3 mirror served by presigned redirect, and a credential model that keeps upstream secrets in one place"

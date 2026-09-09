@@ -401,6 +401,12 @@ fn verify_s3(
             Err(error) => {
                 eprintln!("{error}");
                 if let Some(store) = &store {
+                    if artifact.provenance.license.trim().is_empty() {
+                        return Err(DatastoreError::Manifest(format!(
+                            "{} needs a license before redistribution",
+                            artifact.key
+                        )));
+                    }
                     let path = store.get(artifact)?;
                     let meta = metadata(store, &artifact.key)?;
                     if let Some(etag) = repair_etag {
