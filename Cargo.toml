@@ -10,3 +10,21 @@ keywords = ["cache", "artifacts", "s3", "mirror", "astronomy"]
 categories = ["caching", "filesystem"]
 
 [dependencies]
+fs2 = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+url = "2"
+zeroize = "1"
+indicatif = { version = "0.17", optional = true }
+
+[features]
+default = ["mirror-http", "progress"]
+mirror-http = []
+mirror-s3 = []
+onepassword = []
+progress = ["dep:indicatif"]
