@@ -33,11 +33,6 @@ pub enum Credential {
         secret: Secret,
         expires_at: Option<SystemTime>,
     },
-    AwsSigV4 {
-        access_key: String,
-        secret: Secret,
-        region: String,
-    },
 }
 
 pub trait CredentialProvider: Send + Sync {

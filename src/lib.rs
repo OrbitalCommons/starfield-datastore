@@ -12,11 +12,15 @@
 
 mod artifact;
 mod check;
+mod config;
 mod credential;
 mod error;
+mod fetch;
 mod manifest;
+mod mirror;
 #[cfg(feature = "mirror-s3")]
 mod s3;
+mod store;
 
 pub use artifact::{Artifact, ArtifactKey, Freshness, Provenance, Source};
 pub use check::{CheckFailure, ContentCheck};
@@ -28,5 +32,9 @@ pub use credential::{
 };
 pub use error::{DatastoreError, Result};
 pub use manifest::Manifest;
+pub use mirror::Mirror;
 #[cfg(feature = "mirror-s3")]
 pub use s3::{MirrorObject, PutOutcome, S3Mirror};
+pub use store::{
+    Datastore, DatastoreBuilder, IndexEntry, Layer, ProgressFn, ResolveOutcome, VerifyFailure,
+};
