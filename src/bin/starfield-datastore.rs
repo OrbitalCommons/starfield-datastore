@@ -343,6 +343,10 @@ fn verify_s3(
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
     let mut failed = 0;
+    let verification_cache = DatastoreBuilder::from_env()?
+        .without_mirror()
+        .offline(true)
+        .build()?;
     let store = if repair {
         Some(upstream_store()?)
     } else {
@@ -358,7 +362,8 @@ fn verify_s3(
         } else {
             None
         };
-        let mut temp = tempfile::NamedTempFile::new()?;
+        let mut temp =
+            tempfile::NamedTempFile::new_in(verification_cache.cache_root().join("tmp"))?;
         let check = (|| -> Result<()> {
             if let Some(error) = head_error {
                 return Err(error);
