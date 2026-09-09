@@ -9,6 +9,11 @@ readme = "README.md"
 keywords = ["cache", "artifacts", "s3", "mirror", "astronomy"]
 categories = ["caching", "filesystem"]
 
+[[bin]]
+name = "starfield-datastore"
+path = "src/bin/starfield-datastore.rs"
+required-features = ["cli"]
+
 [dependencies]
 fs2 = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "cookies"] }

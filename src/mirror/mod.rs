@@ -6,7 +6,9 @@
 //! chain only ever reads a mirror; writing is an explicit act of the server.
 
 use crate::fetch::Progress;
-use crate::{ArtifactKey, DatastoreError, Result};
+#[cfg(any(not(feature = "mirror-http"), not(feature = "mirror-s3")))]
+use crate::DatastoreError;
+use crate::{ArtifactKey, Result};
 use std::io::Write;
 use std::time::Duration;
 
@@ -60,6 +62,14 @@ pub(crate) fn open(
         Mirror::Http { .. } => Err(DatastoreError::Mirror(
             "this build has no HTTP mirror support (feature `mirror-http`)".into(),
         )),
+        #[cfg(feature = "mirror-s3")]
+        Mirror::S3 {
+            bucket,
+            prefix,
+            region,
+            ..
+        } => Ok(Box::new(crate::S3Mirror::new(bucket, prefix, region)?)),
+        #[cfg(not(feature = "mirror-s3"))]
         Mirror::S3 { .. } => Err(DatastoreError::Mirror(
             "this build has no S3 mirror support (feature `mirror-s3`)".into(),
         )),

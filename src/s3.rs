@@ -88,6 +88,41 @@ impl S3Mirror {
         self.runtime().block_on(self.head_async(key))
     }
 
+    /// Obtain a repair precondition even when application metadata is damaged.
+    /// `None` means the object is absent; existing objects must have an ETag.
+    pub fn observed_etag(&self, key: &ArtifactKey) -> Result<Option<String>> {
+        self.runtime().block_on(async {
+            match self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(key.mirror_path(&self.prefix))
+                .send()
+                .await
+            {
+                Ok(output) => output
+                    .e_tag()
+                    .map(|etag| Some(etag.to_owned()))
+                    .ok_or_else(|| {
+                        mirror_error("existing S3 object has no ETag for conditional repair")
+                    }),
+                Err(error)
+                    if error
+                        .raw_response()
+                        .is_some_and(|r| r.status().as_u16() == 404) =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(service_error(
+                    "HEAD repair precondition",
+                    error
+                        .as_service_error()
+                        .and_then(ProvideErrorMetadata::code),
+                )),
+            }
+        })
+    }
+
     async fn head_async(&self, key: &ArtifactKey) -> Result<Option<MirrorObject>> {
         match self
             .client
@@ -425,6 +460,15 @@ impl Drop for S3Mirror {
     }
 }
 
+impl crate::mirror::MirrorRead for S3Mirror {
+    fn fetch(&self, key: &ArtifactKey, sink: &mut dyn Write) -> Result<bool> {
+        self.fetch(key, sink)
+    }
+    fn location(&self, key: &ArtifactKey) -> String {
+        format!("s3://{}/{}", self.bucket, key.mirror_path(&self.prefix))
+    }
+}
+
 fn mirror_error(message: &str) -> DatastoreError {
     DatastoreError::Mirror(message.into())
 }
@@ -704,6 +748,28 @@ mod tests {
             assert!(missing.is_none());
         });
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn explicit_repair_can_recover_missing_metadata_with_etag_precondition() {
+        let (file, meta) = blob(b"data");
+        let damaged = || Reply {
+            status: 200,
+            headers: vec![("ETag".into(), "\"old\"".into())],
+            body: String::new(),
+        };
+        let (mirror, rx, thread) = stub(vec![damaged(), damaged(), Reply::new(200, "")]);
+        let key = ArtifactKey::new("data").unwrap();
+        assert!(mirror.head(&key).is_err());
+        let etag = mirror.observed_etag(&key).unwrap().unwrap();
+        assert_eq!(
+            mirror.replace(&key, file.path(), &meta, &etag).unwrap(),
+            PutOutcome::Stored
+        );
+        thread.join().unwrap();
+        let requests = rx.into_iter().collect::<Vec<_>>();
+        assert_eq!(requests[2].1["if-match"], "\"old\"");
+        assert!(!requests[2].1.contains_key("if-none-match"));
     }
     #[test]
     fn multipart_upload_conditions_completion_and_aborts_failed_uploads() {
