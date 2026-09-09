@@ -9,6 +9,11 @@ readme = "README.md"
 keywords = ["cache", "artifacts", "s3", "mirror", "astronomy"]
 categories = ["caching", "filesystem"]
 
+[[bin]]
+name = "starfield-datastore"
+path = "src/bin/starfield-datastore.rs"
+required-features = ["cli"]
+
 [dependencies]
 fs2 = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "cookies"] }
@@ -23,7 +28,7 @@ zeroize = "1"
 indicatif = { version = "0.17", optional = true }
 aws-config = { version = "1.12.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"], optional = true }
 aws-sdk-s3 = { version = "1.146.0", default-features = false, features = ["rt-tokio", "default-https-client", "rustls"], optional = true }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "signal", "io-util"], optional = true }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "signal", "io-util", "macros"], optional = true }
 clap = { version = "4.6.6", features = ["derive"], optional = true }
 axum = { version = "0.8.9", optional = true }
 aws-credential-types = { version = "1.3.0", optional = true }

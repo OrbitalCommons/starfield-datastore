@@ -84,8 +84,60 @@ impl S3Mirror {
         self.runtime.as_ref().expect("runtime exists until drop")
     }
 
+    fn service_error(
+        &self,
+        key: &ArtifactKey,
+        operation: &str,
+        code: Option<&str>,
+    ) -> DatastoreError {
+        let code = code
+            .filter(|s| s.len() < 80 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .unwrap_or("request failed");
+        DatastoreError::Mirror(format!(
+            "S3 {operation} s3://{}/{}: {code}",
+            self.bucket,
+            key.mirror_path(&self.prefix)
+        ))
+    }
+
     pub fn head(&self, key: &ArtifactKey) -> Result<Option<MirrorObject>> {
         self.runtime().block_on(self.head_async(key))
+    }
+
+    /// Obtain a repair precondition even when application metadata is damaged.
+    /// `None` means the object is absent; existing objects must have an ETag.
+    pub fn observed_etag(&self, key: &ArtifactKey) -> Result<Option<String>> {
+        self.runtime().block_on(async {
+            match self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(key.mirror_path(&self.prefix))
+                .send()
+                .await
+            {
+                Ok(output) => output
+                    .e_tag()
+                    .map(|etag| Some(etag.to_owned()))
+                    .ok_or_else(|| {
+                        mirror_error("existing S3 object has no ETag for conditional repair")
+                    }),
+                Err(error)
+                    if error
+                        .raw_response()
+                        .is_some_and(|r| r.status().as_u16() == 404) =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(self.service_error(
+                    key,
+                    "HEAD repair precondition",
+                    error
+                        .as_service_error()
+                        .and_then(ProvideErrorMetadata::code),
+                )),
+            }
+        })
     }
 
     async fn head_async(&self, key: &ArtifactKey) -> Result<Option<MirrorObject>> {
@@ -132,7 +184,8 @@ impl S3Mirror {
             {
                 Ok(None)
             }
-            Err(error) => Err(service_error(
+            Err(error) => Err(self.service_error(
+                key,
                 "HEAD",
                 error
                     .as_service_error()
@@ -162,7 +215,8 @@ impl S3Mirror {
                     return Ok(false)
                 }
                 Err(error) => {
-                    return Err(service_error(
+                    return Err(self.service_error(
+                        key,
                         "GET",
                         error
                             .as_service_error()
@@ -276,7 +330,8 @@ impl S3Mirror {
                         if status == Some(409) && attempt < 2 {
                             continue;
                         }
-                        return Err(service_error(
+                        return Err(self.service_error(
+                            key,
                             "PUT",
                             error
                                 .as_service_error()
@@ -312,13 +367,16 @@ impl S3Mirror {
         let upload = self
             .client
             .create_multipart_upload()
+            .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
+            .checksum_type(aws_sdk_s3::types::ChecksumType::Composite)
             .bucket(&self.bucket)
             .key(&object_key)
             .set_metadata(Some(metadata))
             .send()
             .await
             .map_err(|e| {
-                service_error(
+                self.service_error(
+                    key,
                     "CreateMultipartUpload",
                     e.as_service_error().and_then(ProvideErrorMetadata::code),
                 )
@@ -344,6 +402,7 @@ impl S3Mirror {
                 let part = self
                     .client
                     .upload_part()
+                    .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
                     .bucket(&self.bucket)
                     .key(&object_key)
                     .upload_id(id)
@@ -352,7 +411,8 @@ impl S3Mirror {
                     .send()
                     .await
                     .map_err(|e| {
-                        service_error(
+                        self.service_error(
+                            key,
                             "UploadPart",
                             e.as_service_error().and_then(ProvideErrorMetadata::code),
                         )
@@ -360,10 +420,14 @@ impl S3Mirror {
                 let etag = part
                     .e_tag()
                     .ok_or_else(|| mirror_error("upload part has no ETag"))?;
+                let checksum = part
+                    .checksum_crc32()
+                    .ok_or_else(|| mirror_error("upload part has no CRC32 checksum"))?;
                 parts.push(
                     CompletedPart::builder()
                         .part_number(number)
                         .e_tag(etag)
+                        .checksum_crc32(checksum)
                         .build(),
                 );
                 offset += length;
@@ -394,7 +458,8 @@ impl S3Mirror {
                 {
                     self.existing_after_race(key, meta).await
                 }
-                Err(error) => Err(service_error(
+                Err(error) => Err(self.service_error(
+                    key,
                     "CompleteMultipartUpload",
                     error
                         .as_service_error()
@@ -425,15 +490,17 @@ impl Drop for S3Mirror {
     }
 }
 
+impl crate::mirror::MirrorRead for S3Mirror {
+    fn fetch(&self, key: &ArtifactKey, sink: &mut dyn Write) -> Result<bool> {
+        self.fetch(key, sink)
+    }
+    fn location(&self, key: &ArtifactKey) -> String {
+        format!("s3://{}/{}", self.bucket, key.mirror_path(&self.prefix))
+    }
+}
+
 fn mirror_error(message: &str) -> DatastoreError {
     DatastoreError::Mirror(message.into())
-}
-fn service_error(operation: &str, code: Option<&str>) -> DatastoreError {
-    // Service messages and request URLs can carry bearer capabilities.
-    let code = code
-        .filter(|s| s.len() < 80 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
-        .unwrap_or("request failed");
-    DatastoreError::Mirror(format!("S3 {operation}: {code}"))
 }
 fn validate_digest(digest: &str) -> Result<()> {
     if digest.len() != 64
@@ -490,6 +557,7 @@ mod tests {
         thread,
     };
 
+    #[derive(Clone)]
     struct Reply {
         status: u16,
         headers: Vec<(String, String)>,
@@ -516,7 +584,7 @@ mod tests {
             }
         }
     }
-    type Recorded = (String, HashMap<String, String>, u64);
+    type Recorded = (String, HashMap<String, String>, u64, Vec<u8>);
     fn stub(replies: Vec<Reply>) -> (S3Mirror, mpsc::Receiver<Recorded>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -557,9 +625,19 @@ mod tests {
                     .get("content-length")
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
-                let received =
-                    std::io::copy(&mut reader.take(length), &mut std::io::sink()).unwrap();
-                let _ = tx.send((first.clone(), headers, received));
+                let mut body = Vec::new();
+                reader
+                    .by_ref()
+                    .take(length.min(65536))
+                    .read_to_end(&mut body)
+                    .unwrap();
+                let received = body.len() as u64
+                    + std::io::copy(
+                        &mut reader.take(length.saturating_sub(body.len() as u64)),
+                        &mut std::io::sink(),
+                    )
+                    .unwrap();
+                let _ = tx.send((first.clone(), headers, received, body));
                 write!(
                     stream,
                     "HTTP/1.1 {} Stub\r\nConnection: close\r\n",
@@ -705,6 +783,28 @@ mod tests {
         });
         thread.join().unwrap();
     }
+
+    #[test]
+    fn explicit_repair_can_recover_missing_metadata_with_etag_precondition() {
+        let (file, meta) = blob(b"data");
+        let damaged = || Reply {
+            status: 200,
+            headers: vec![("ETag".into(), "\"old\"".into())],
+            body: String::new(),
+        };
+        let (mirror, rx, thread) = stub(vec![damaged(), damaged(), Reply::new(200, "")]);
+        let key = ArtifactKey::new("data").unwrap();
+        assert!(mirror.head(&key).is_err());
+        let etag = mirror.observed_etag(&key).unwrap().unwrap();
+        assert_eq!(
+            mirror.replace(&key, file.path(), &meta, &etag).unwrap(),
+            PutOutcome::Stored
+        );
+        thread.join().unwrap();
+        let requests = rx.into_iter().collect::<Vec<_>>();
+        assert_eq!(requests[2].1["if-match"], "\"old\"");
+        assert!(!requests[2].1.contains_key("if-none-match"));
+    }
     #[test]
     fn multipart_upload_conditions_completion_and_aborts_failed_uploads() {
         let (mut file, _) = blob(b"");
@@ -719,6 +819,8 @@ mod tests {
         };
         let mut part = Reply::new(200, "");
         part.headers.push(("ETag".into(), "\"part\"".into()));
+        part.headers
+            .push(("x-amz-checksum-crc32".into(), "AAAAAA==".into()));
         let (mirror, rx, thread) = stub(vec![Reply::new(404,""),Reply::new(200,"<InitiateMultipartUploadResult><UploadId>upload</UploadId></InitiateMultipartUploadResult>"),Reply {status:part.status,headers:part.headers.clone(),body:part.body.clone()},part,Reply::new(400,"<Error><Code>InvalidRequest</Code></Error>"),Reply::new(204,"")]);
         assert!(mirror
             .put(&ArtifactKey::new("big").unwrap(), file.path(), &meta)
@@ -728,6 +830,54 @@ mod tests {
         assert_eq!(requests[2].2, PART_BYTES);
         assert_eq!(requests[3].2, 1);
         assert_eq!(requests[4].1["if-none-match"], "*");
+        assert_eq!(
+            String::from_utf8_lossy(&requests[4].3)
+                .matches("<ChecksumCRC32>AAAAAA==</ChecksumCRC32>")
+                .count(),
+            2
+        );
         assert!(requests[5].0.starts_with("DELETE "));
+    }
+
+    #[test]
+    fn multipart_repair_completes_with_part_checksums_and_observed_etag() {
+        let (mut file, mut meta) = blob(b"");
+        meta.bytes = PART_BYTES + 1;
+        file.as_file_mut().set_len(meta.bytes).unwrap();
+        meta.sha256 = digest_file(file.path()).unwrap();
+        let part = Reply {
+            status: 200,
+            headers: vec![
+                ("ETag".into(), "\"part\"".into()),
+                ("x-amz-checksum-crc32".into(), "AAAAAA==".into()),
+            ],
+            body: String::new(),
+        };
+        let (mirror,rx,thread) = stub(vec![
+            Reply::new(200,"<InitiateMultipartUploadResult><UploadId>upload</UploadId></InitiateMultipartUploadResult>"),
+            part.clone(),part,
+            Reply::new(200,"<CompleteMultipartUploadResult><ETag>\"complete\"</ETag></CompleteMultipartUploadResult>"),
+        ]);
+        assert_eq!(
+            mirror
+                .replace(
+                    &ArtifactKey::new("big").unwrap(),
+                    file.path(),
+                    &meta,
+                    "\"old\""
+                )
+                .unwrap(),
+            PutOutcome::Stored
+        );
+        thread.join().unwrap();
+        let requests = rx.into_iter().collect::<Vec<_>>();
+        assert_eq!(requests[3].1["if-match"], "\"old\"");
+        assert!(!requests[3].1.contains_key("if-none-match"));
+        assert_eq!(
+            String::from_utf8_lossy(&requests[3].3)
+                .matches("<ChecksumCRC32>AAAAAA==</ChecksumCRC32>")
+                .count(),
+            2
+        );
     }
 }

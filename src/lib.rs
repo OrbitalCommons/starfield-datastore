@@ -20,6 +20,8 @@ mod manifest;
 mod mirror;
 #[cfg(feature = "mirror-s3")]
 mod s3;
+#[cfg(feature = "server")]
+pub mod server;
 mod store;
 
 pub use artifact::{Artifact, ArtifactKey, Freshness, Provenance, Source};
