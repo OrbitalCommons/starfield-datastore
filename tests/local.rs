@@ -111,7 +111,7 @@ fn cache_root_is_shared_and_layout_matches_the_spec() {
 }
 
 #[test]
-fn gc_reclaims_orphan_blobs_and_stale_temp_files_before_evicting_keys() {
+fn gc_reclaims_orphan_blobs_but_never_touches_temp_files() {
     let root = TempDir::new().unwrap();
     let files = TempDir::new().unwrap();
     let store = builder(&root).build().unwrap();
@@ -126,13 +126,11 @@ fn gc_reclaims_orphan_blobs_and_stale_temp_files_before_evicting_keys() {
         .join(format!("ab{}", "c".repeat(62)));
     std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
     std::fs::write(&orphan, [2u8; 500]).unwrap();
-    let stale = root.path().join("tmp/.tmpcrashed");
-    std::fs::write(&stale, [3u8; 100]).unwrap();
-    let fresh = root.path().join("tmp/.tmpinflight");
-    std::fs::write(&fresh, [4u8; 100]).unwrap();
+    let old = root.path().join("tmp/.tmpslow");
+    std::fs::write(&old, [3u8; 100]).unwrap();
     std::fs::File::options()
         .write(true)
-        .open(&stale)
+        .open(&old)
         .unwrap()
         .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600))
         .unwrap();
@@ -147,8 +145,10 @@ fn gc_reclaims_orphan_blobs_and_stale_temp_files_before_evicting_keys() {
         "within budget: no key evicted"
     );
     assert!(!orphan.exists(), "orphan reclaimed");
-    assert!(!stale.exists(), "stale temp file reclaimed");
-    assert!(fresh.exists(), "an in-flight temp file is left alone");
+    assert!(
+        old.exists(),
+        "age proves nothing about a transfer; temp files are never reclaimed"
+    );
     assert_eq!(store.total_bytes().unwrap(), 1000);
     assert!(store.contains(&kept.key));
 }

@@ -196,21 +196,6 @@ impl Layout {
         Ok(out)
     }
 
-    /// Delete in-flight temp files older than `max_age`: a crashed process
-    /// never gets to remove its own.
-    pub(crate) fn remove_stale_tmp(&self, max_age: std::time::Duration) -> Result<()> {
-        let cutoff = std::time::SystemTime::now()
-            .checked_sub(max_age)
-            .unwrap_or(std::time::UNIX_EPOCH);
-        for entry in fs::read_dir(self.root.join("tmp"))? {
-            let entry = entry?;
-            if entry.metadata()?.modified()? < cutoff {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn remove_blob(&self, digest: &str) -> Result<()> {
         match fs::remove_file(self.blob_path(digest)) {
             Ok(()) => Ok(()),

@@ -33,9 +33,6 @@ const PREFIX_BYTES: usize = 8 * 1024;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Temp files older than this belong to a process that is not coming back.
-const STALE_TMP: Duration = Duration::from_secs(24 * 60 * 60);
-
 /// Which layer of the chain served a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -382,10 +379,12 @@ impl Datastore {
         Ok(failures)
     }
 
-    /// Reclaim space: first orphan blobs and stale temp files, then the
-    /// least-recently-fetched keys until the store is within `max_bytes`.
-    /// Explicit only: nothing is evicted during `get`, so a path handed out
-    /// earlier stays valid until the caller chooses to run this.
+    /// Reclaim space: first orphan blobs, then the least-recently-fetched
+    /// keys until the store is within `max_bytes`. Explicit only: nothing is
+    /// evicted during `get`, so a path handed out earlier stays valid until
+    /// the caller chooses to run this. `tmp/` is left alone: a temp file's
+    /// age says nothing about whether its transfer is still running, so
+    /// leftovers from a crash are for the operator to remove.
     pub fn gc(&self, max_bytes: u64) -> Result<Vec<ArtifactKey>> {
         let (mut entries, sizes) = {
             let _store = self.layout.store_lock()?;
@@ -400,7 +399,6 @@ impl Datastore {
                     self.layout.remove_blob(&digest)?;
                 }
             }
-            self.layout.remove_stale_tmp(STALE_TMP)?;
             (entries, sizes)
         };
         entries.sort_by_key(|(_, e)| e.fetched_at);
