@@ -9,3 +9,18 @@
 //!
 //! The full design is in `docs/spec.md`. This crate never depends on
 //! `starfield`; `starfield` depends on it.
+
+mod artifact;
+mod check;
+mod credential;
+mod error;
+
+pub use artifact::{Artifact, ArtifactKey, Freshness, Provenance, Source};
+pub use check::{CheckFailure, ContentCheck};
+#[cfg(feature = "onepassword")]
+pub use credential::OnePasswordProvider;
+pub use credential::{
+    ChainProvider, Credential, CredentialProvider, EnvProvider, NetrcProvider, Secret,
+    StaticProvider,
+};
+pub use error::{DatastoreError, Result};
