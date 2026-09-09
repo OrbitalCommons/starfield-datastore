@@ -562,3 +562,122 @@ fn a_moved_pin_refetches_and_a_corrupt_blob_is_refused() {
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].expected, hex(&other));
 }
+
+#[test]
+fn nested_conflicting_pins_can_never_pass() {
+    let archive = Stub::start("127.0.0.1");
+    let bytes = body(12, 2048);
+    archive.route("/k", Response::ok(bytes.clone()));
+    let root = TempDir::new().unwrap();
+    let store = builder(&root).allow_upstream(true).build().unwrap();
+    let artifact = Artifact::new(key("k"), vec![Source::new(format!("{}/k", archive.url()))])
+        .with_check(ContentCheck::All(vec![
+            ContentCheck::Sha256(hex(&bytes)),
+            ContentCheck::All(vec![
+                ContentCheck::NotHtml,
+                ContentCheck::Sha256("0".repeat(64)),
+            ]),
+        ]));
+    let err = store.get(&artifact).unwrap_err();
+    assert!(
+        matches!(&err, DatastoreError::ContentRejected { failure, .. } if failure.check == "Sha256"),
+        "the matching outer pin must not mask the conflicting inner one: {err}"
+    );
+    assert!(!store.contains(&artifact.key));
+}
+
+#[test]
+fn concurrent_gets_for_one_key_make_one_upstream_request() {
+    let archive = Stub::start("127.0.0.1");
+    let bytes = body(13, 8192);
+    archive.route("/k", Response::ok(bytes.clone()));
+    let root = TempDir::new().unwrap();
+    let store = std::sync::Arc::new(builder(&root).allow_upstream(true).build().unwrap());
+    let artifact = std::sync::Arc::new(Artifact::new(
+        key("k"),
+        vec![Source::new(format!("{}/k", archive.url()))],
+    ));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let store = store.clone();
+            let artifact = artifact.clone();
+            std::thread::spawn(move || store.get_with_outcome(&artifact).unwrap())
+        })
+        .collect();
+    let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let served_upstream = outcomes
+        .iter()
+        .filter(|(_, o)| o.layer == Layer::Upstream)
+        .count();
+    assert_eq!(
+        served_upstream, 1,
+        "the key lock lets exactly one fetch through"
+    );
+    assert_eq!(archive.requests().len(), 1);
+    assert!(outcomes
+        .iter()
+        .all(|(p, _)| std::fs::read(p).unwrap() == bytes));
+    assert!(std::fs::read_dir(root.path().join("tmp"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+#[test]
+fn gc_racing_publication_never_leaves_dangling_keys() {
+    let root = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let store = std::sync::Arc::new(builder(&root).build().unwrap());
+    let mut sources = Vec::new();
+    for i in 0..40u8 {
+        let path = files.path().join(format!("f{i}"));
+        std::fs::write(&path, body(i, 1500 + i as usize)).unwrap();
+        sources.push(path);
+    }
+    let importer = {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            for (i, path) in sources.iter().enumerate() {
+                let artifact = Artifact::new(key(&format!("race/{i}")), vec![]);
+                store.import(&artifact, path).unwrap();
+                let alias = Artifact::new(key(&format!("alias/{i}")), vec![]);
+                store.import(&alias, path).unwrap();
+            }
+        })
+    };
+    let collector = {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            for _ in 0..60 {
+                store.gc(4000).unwrap();
+                std::thread::yield_now();
+            }
+        })
+    };
+    importer.join().unwrap();
+    collector.join().unwrap();
+
+    assert!(
+        store.verify().unwrap().is_empty(),
+        "every surviving key still has its blob"
+    );
+    for k in store.keys().unwrap() {
+        assert!(store.peek(&k).is_some(), "{k} references a missing blob");
+    }
+    let referenced: std::collections::HashSet<String> = store
+        .keys()
+        .unwrap()
+        .iter()
+        .map(|k| store.entry(k).unwrap().digest)
+        .collect();
+    store.gc(u64::MAX).unwrap();
+    let blobs: Vec<_> = std::fs::read_dir(root.path().join("blobs"))
+        .unwrap()
+        .flat_map(|d| std::fs::read_dir(d.unwrap().path()).unwrap())
+        .map(|f| f.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        blobs.iter().all(|b| referenced.contains(b)),
+        "no orphans after gc"
+    );
+}

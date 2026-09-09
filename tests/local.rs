@@ -109,3 +109,46 @@ fn cache_root_is_shared_and_layout_matches_the_spec() {
     assert!(!store.contains(&ArtifactKey::new("nothing").unwrap()));
     assert_eq!(store.total_bytes().unwrap(), 0);
 }
+
+#[test]
+fn gc_reclaims_orphan_blobs_and_stale_temp_files_before_evicting_keys() {
+    let root = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let store = builder(&root).build().unwrap();
+    let kept = artifact("kept");
+    store
+        .import(&kept, &seed(&files, "kept", &[1u8; 1000]))
+        .unwrap();
+
+    let orphan = root
+        .path()
+        .join("blobs/ab")
+        .join(format!("ab{}", "c".repeat(62)));
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, [2u8; 500]).unwrap();
+    let stale = root.path().join("tmp/.tmpcrashed");
+    std::fs::write(&stale, [3u8; 100]).unwrap();
+    let fresh = root.path().join("tmp/.tmpinflight");
+    std::fs::write(&fresh, [4u8; 100]).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600))
+        .unwrap();
+    assert_eq!(
+        store.total_bytes().unwrap(),
+        1500,
+        "orphans count against the budget"
+    );
+
+    assert!(
+        store.gc(u64::MAX).unwrap().is_empty(),
+        "within budget: no key evicted"
+    );
+    assert!(!orphan.exists(), "orphan reclaimed");
+    assert!(!stale.exists(), "stale temp file reclaimed");
+    assert!(fresh.exists(), "an in-flight temp file is left alone");
+    assert_eq!(store.total_bytes().unwrap(), 1000);
+    assert!(store.contains(&kept.key));
+}

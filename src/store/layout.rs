@@ -130,7 +130,7 @@ impl Layout {
         )?;
         tmp.as_file().sync_all()?;
         tmp.persist(&path).map_err(|e| e.error)?;
-        Ok(())
+        sync_dir(parent)
     }
 
     pub(crate) fn remove_entry(&self, key: &ArtifactKey) -> Result<bool> {
@@ -160,10 +160,55 @@ impl Layout {
         if path.is_file() {
             return Ok((digest_file(&path)? == digest).then_some(path));
         }
-        fs::create_dir_all(path.parent().expect("blob path has a parent"))?;
+        let parent = path.parent().expect("blob path has a parent");
+        fs::create_dir_all(parent)?;
         tmp.as_file().sync_all()?;
         tmp.persist(&path).map_err(|e| e.error)?;
+        sync_dir(parent)?;
         Ok(Some(path))
+    }
+
+    /// Every blob physically present, whether or not an index entry refers
+    /// to it: a crash between rename and sidecar write, or a pin that moved
+    /// on, leaves orphans that only an explicit `gc` reclaims.
+    pub(crate) fn blobs(&self) -> Result<Vec<(String, u64)>> {
+        let mut out = Vec::new();
+        let blobs = self.root.join("blobs");
+        if !blobs.is_dir() {
+            return Ok(out);
+        }
+        for shard in fs::read_dir(&blobs)? {
+            let shard = shard?.path();
+            if !shard.is_dir() {
+                continue;
+            }
+            for blob in fs::read_dir(&shard)? {
+                let blob = blob?;
+                let Some(name) = blob.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                if is_digest(&name) && blob.file_type()?.is_file() {
+                    out.push((name, blob.metadata()?.len()));
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Delete in-flight temp files older than `max_age`: a crashed process
+    /// never gets to remove its own.
+    pub(crate) fn remove_stale_tmp(&self, max_age: std::time::Duration) -> Result<()> {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(max_age)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        for entry in fs::read_dir(self.root.join("tmp"))? {
+            let entry = entry?;
+            if entry.metadata()?.modified()? < cutoff {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn remove_blob(&self, digest: &str) -> Result<()> {
@@ -173,6 +218,18 @@ impl Layout {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Make a rename durable: the directory entry lives in the parent.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> Result<()> {
+    File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn walk(base: &Path, dir: &Path, out: &mut Vec<ArtifactKey>) -> Result<()> {

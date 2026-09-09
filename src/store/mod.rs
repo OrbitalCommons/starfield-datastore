@@ -33,6 +33,9 @@ const PREFIX_BYTES: usize = 8 * 1024;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Temp files older than this belong to a process that is not coming back.
+const STALE_TMP: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Which layer of the chain served a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -352,16 +355,10 @@ impl Datastore {
         self.layout.keys()
     }
 
-    /// Bytes on disk across all blobs; shared blobs count once.
+    /// Bytes on disk across all blobs, orphans included; shared blobs count
+    /// once.
     pub fn total_bytes(&self) -> Result<u64> {
-        let mut seen = HashSet::new();
-        let mut total = 0;
-        for (_, entry) in self.entries()? {
-            if seen.insert(entry.digest.clone()) {
-                total += self.blob_size(&entry);
-            }
-        }
-        Ok(total)
+        Ok(self.layout.blobs()?.iter().map(|(_, len)| len).sum())
     }
 
     /// Rehash every blob; report keys whose content no longer matches.
@@ -385,17 +382,28 @@ impl Datastore {
         Ok(failures)
     }
 
-    /// Evict least-recently-fetched keys until the store is within
-    /// `max_bytes`. Explicit only: nothing is evicted during `get`.
+    /// Reclaim space: first orphan blobs and stale temp files, then the
+    /// least-recently-fetched keys until the store is within `max_bytes`.
+    /// Explicit only: nothing is evicted during `get`, so a path handed out
+    /// earlier stays valid until the caller chooses to run this.
     pub fn gc(&self, max_bytes: u64) -> Result<Vec<ArtifactKey>> {
-        let mut entries = self.entries()?;
+        let (mut entries, sizes) = {
+            let _store = self.layout.store_lock()?;
+            let entries = self.entries()?;
+            let referenced: HashSet<&str> =
+                entries.iter().map(|(_, e)| e.digest.as_str()).collect();
+            let mut sizes: HashMap<String, u64> = HashMap::new();
+            for (digest, len) in self.layout.blobs()? {
+                if referenced.contains(digest.as_str()) {
+                    sizes.insert(digest, len);
+                } else {
+                    self.layout.remove_blob(&digest)?;
+                }
+            }
+            self.layout.remove_stale_tmp(STALE_TMP)?;
+            (entries, sizes)
+        };
         entries.sort_by_key(|(_, e)| e.fetched_at);
-        let mut sizes: HashMap<String, u64> = HashMap::new();
-        for (_, entry) in &entries {
-            sizes
-                .entry(entry.digest.clone())
-                .or_insert_with(|| self.blob_size(entry));
-        }
         let mut total: u64 = sizes.values().sum();
         let mut removed = Vec::new();
         for (key, snapshot) in &entries {
@@ -430,12 +438,6 @@ impl Datastore {
             }
         }
         Ok(out)
-    }
-
-    fn blob_size(&self, entry: &IndexEntry) -> u64 {
-        std::fs::metadata(self.layout.blob_path(&entry.digest))
-            .map(|m| m.len())
-            .unwrap_or(entry.bytes)
     }
 
     fn digest_referenced(&self, digest: &str) -> Result<bool> {
