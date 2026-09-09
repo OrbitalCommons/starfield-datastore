@@ -17,7 +17,7 @@ deployment-specific and live in the org's infrastructure notes, not here.
   the verifier observed.
 - Presigned GET URLs expire after five minutes. Clients receive them via a
   302 from the server and download straight from S3; the server never
-  carries artifact bytes.
+  proxies artifact bytes to a client. It does fetch and upload on a miss.
 
 ## 2. The writer role
 
@@ -62,7 +62,7 @@ keyed on the host actually being asked (Earthdata redirects through
 
 | Provider | Where | Notes |
 |---|---|---|
-| `NetrcProvider` | `~/.netrc`, mode `0600` | `machine urs.earthdata.nasa.gov login … password …`. A `default` entry is ignored on purpose. |
+| `NetrcProvider` | `~starfield/.netrc` (`/var/lib/starfield-datastore/.netrc`), mode `0600` | `machine urs.earthdata.nasa.gov login … password …`. A `default` entry is ignored on purpose. |
 | `EnvProvider` | `STARFIELD_TOKEN_<HOST>` | Host uppercased, non-alphanumerics to `_`: `STARFIELD_TOKEN_ARCHIVE_STSCI_EDU`. Bearer tokens. |
 | `OnePasswordProvider` | `STARFIELD_OP_ITEM=op://<vault>/<item>` | Feature `onepassword`; each host is a field of the item, read through `op` at request time. |
 
