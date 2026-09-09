@@ -1,0 +1,27 @@
+[Unit]
+Description=starfield ephemeris server
+Documentation=https://github.com/OrbitalCommons/starfield-datastore/blob/main/docs/deploy.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=starfield
+Group=starfield
+EnvironmentFile=/etc/starfield-datastore/env
+ExecStart=/usr/local/bin/starfield-datastore serve \
+  --manifest /etc/starfield-datastore/ephemeris.toml \
+  --bucket ${STARFIELD_BUCKET} \
+  --region ${AWS_REGION} \
+  --bind ${STARFIELD_BIND}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/starfield-datastore
+
+[Install]
+WantedBy=multi-user.target

@@ -602,7 +602,7 @@ Simultaneously the pin, the mirror build input and the offline allow-list.
 key = "naif/spk/de440.bsp"
 sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440.bsp"]
 sha256 = "..."           # optional until first mirrored
-bytes = 119857024
+bytes = 119799808
 freshness = "immutable"
 check = { magic = ["DAF/SPK", "NAIF/DAF"] }
 description = "NAIF generic kernels, DE440 planetary ephemeris"

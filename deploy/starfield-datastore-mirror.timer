@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly starfield mirror pre-warm
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=starfield-datastore-mirror.service
+
+[Install]
+WantedBy=timers.target

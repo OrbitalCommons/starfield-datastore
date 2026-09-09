@@ -9,10 +9,7 @@
 
 [[artifact]]
 key = "naif/spk/de421.bsp"
-sources = [
-    "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/a_old_versions/de421.bsp",
-    "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de421.bsp",
-]
+sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/a_old_versions/de421.bsp"]
 bytes = 16790528
 freshness = "immutable"
 check = { magic = ["DAF/SPK", "NAIF/DAF"], trim_leading_whitespace = false }
