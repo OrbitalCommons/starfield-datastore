@@ -15,6 +15,8 @@ mod check;
 mod credential;
 mod error;
 mod manifest;
+#[cfg(feature = "mirror-s3")]
+mod s3;
 
 pub use artifact::{Artifact, ArtifactKey, Freshness, Provenance, Source};
 pub use check::{CheckFailure, ContentCheck};
@@ -26,3 +28,5 @@ pub use credential::{
 };
 pub use error::{DatastoreError, Result};
 pub use manifest::Manifest;
+#[cfg(feature = "mirror-s3")]
+pub use s3::{MirrorObject, PutOutcome, S3Mirror};
