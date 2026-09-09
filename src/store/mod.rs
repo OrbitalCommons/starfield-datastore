@@ -68,21 +68,22 @@ pub struct IndexEntry {
     pub layer: Layer,
 }
 
-/// A blob whose content no longer matches its index entry.
+/// A key whose blob no longer agrees with its index entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyFailure {
     pub key: ArtifactKey,
+    /// The digest the index records.
     pub expected: String,
-    /// `None` when the blob is missing altogether.
+    /// The digest the blob hashes to now; `None` when it is missing.
     pub actual: Option<String>,
+    /// Why this is a failure, in words: a missing blob, a digest mismatch,
+    /// or a size that disagrees with the sidecar.
+    pub reason: String,
 }
 
 impl std::fmt::Display for VerifyFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.actual {
-            Some(actual) => write!(f, "{}: expected {} got {actual}", self.key, self.expected),
-            None => write!(f, "{}: blob {} is missing", self.key, self.expected),
-        }
+        write!(f, "{}: {}", self.key, self.reason)
     }
 }
 
@@ -358,23 +359,36 @@ impl Datastore {
         Ok(self.layout.blobs()?.iter().map(|(_, len)| len).sum())
     }
 
-    /// Rehash every blob; report keys whose content no longer matches.
+    /// Rehash every blob; report keys whose content or size no longer
+    /// matches the sidecar. Exactly what `get` would refuse to serve.
     pub fn verify(&self) -> Result<Vec<VerifyFailure>> {
         let mut failures = Vec::new();
         for (key, entry) in self.entries()? {
             let path = self.layout.blob_path(&entry.digest);
-            let actual = if path.is_file() {
-                Some(digest_file(&path)?)
-            } else {
-                None
-            };
-            if actual.as_deref() != Some(entry.digest.as_str()) {
+            if !path.is_file() {
                 failures.push(VerifyFailure {
                     key,
+                    reason: format!("blob {} is missing", entry.digest),
                     expected: entry.digest,
-                    actual,
+                    actual: None,
                 });
+                continue;
             }
+            let length = std::fs::metadata(&path)?.len();
+            let actual = digest_file(&path)?;
+            let reason = if actual != entry.digest {
+                format!("blob hashes to {actual}, index records {}", entry.digest)
+            } else if length != entry.bytes {
+                format!("blob is {length} bytes, index records {}", entry.bytes)
+            } else {
+                continue;
+            };
+            failures.push(VerifyFailure {
+                key,
+                expected: entry.digest,
+                actual: Some(actual),
+                reason,
+            });
         }
         Ok(failures)
     }

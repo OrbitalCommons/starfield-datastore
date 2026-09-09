@@ -168,6 +168,9 @@ local cache only. A CI job whose cache is already warm sets
 | Repair the mirror | `… --at s3://<bucket>/<prefix> --repair` (conditional on the observed ETag) |
 | Reclaim disk | `starfield-datastore gc --max-bytes N` (orphans and stale temp files first, then oldest keys; never runs implicitly) |
 | See what is cached | `starfield-datastore list --bytes` |
+| Seed from a file already on disk | `starfield-datastore import --manifest M --key K --from PATH` (validated like a download; copies) |
+| Drop one key | `starfield-datastore remove --key K` (how a corrupt blob shared with a key the manifest does not know gets cleared; `verify` names every key referencing it) |
+| Crash leftovers | files in `<cache>/tmp/` older than any running transfer can be deleted by hand; `gc` never touches them |
 
 `gc` is explicit because consumers hold paths, and sometimes memory maps,
 into the cache. Do not schedule it on a host where a long-running consumer

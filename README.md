@@ -27,6 +27,16 @@ The design, API, and the log of decisions behind them are in
 issue, [#1](https://github.com/OrbitalCommons/starfield-datastore/issues/1)
 (formerly `starfield#189`).
 
+## Status
+
+Rollout steps 1–4 of `docs/spec.md` §15 are implemented here: identity and
+validation, credentials, manifests, the content-addressed local store and
+resolution chain, the S3 mirror, and the `starfield-datastore` binary.
+`manifests/ephemeris.toml` lists the kernels `starfield` needs and
+`docs/deploy.md` describes running the server. Step 5 — routing
+`starfield::Loader` and the `starfield-datasources` downloaders through this
+crate — lives in those repositories.
+
 ## Library
 
 ```rust,no_run
