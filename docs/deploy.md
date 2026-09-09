@@ -136,16 +136,19 @@ command nightly with the same environment file. The environment file is mode
 
 ## 6. Clients
 
-On the tailnet nothing but the mirror URL is needed:
+On the tailnet nothing but the mirror URL is needed. The server speaks plain
+HTTP; the tailnet link is already encrypted end to end, and the artifact
+bytes travel over HTTPS to S3 anyway. Use `https://` only if Tailscale Serve
+or a reverse proxy terminates TLS in front of the server.
 
 ```
-STARFIELD_MIRROR=https://<tailnet-hostname>:8080
+STARFIELD_MIRROR=http://<tailnet-hostname>:8080
 ```
 
 or in `~/.config/starfield/datastore.toml`:
 
 ```toml
-mirror = "https://<tailnet-hostname>:8080"
+mirror = "http://<tailnet-hostname>:8080"
 ```
 
 Off the tailnet (an outside contributor, a GitHub-hosted runner):
