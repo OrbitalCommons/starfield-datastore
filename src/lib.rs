@@ -3,9 +3,9 @@
 //!
 //! A request resolves down a chain — local disk, then the organisation's
 //! mirror, then (only when explicitly allowed) the upstream archive —
-//! populating the nearer layers as it goes. Nothing that fails validation is
-//! ever cached, and upstream credentials live in exactly one place: the
-//! ephemeris server.
+//! populating the local cache. Only the server and its batch commands write
+//! the mirror. Validation failures are never cached. Tailnet clients need no
+//! archive credentials; an upstream-enabled client uses its own providers.
 //!
 //! The full design is in `docs/spec.md`. This crate never depends on
 //! `starfield`; `starfield` depends on it.
