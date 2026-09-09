@@ -1,7 +1,10 @@
 //! Configuration resolution (spec §11): explicit builder call, then
 //! environment, then `~/.config/starfield/datastore.toml`, then defaults.
 
-use crate::{DatastoreBuilder, DatastoreError, Mirror, Result};
+use crate::{
+    ChainProvider, CredentialProvider, DatastoreBuilder, DatastoreError, EnvProvider, Mirror,
+    NetrcProvider, Result,
+};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -12,6 +15,10 @@ pub(crate) const ENV_ALLOW_UPSTREAM: &str = "STARFIELD_ALLOW_UPSTREAM";
 pub(crate) const ENV_OFFLINE: &str = "STARFIELD_OFFLINE";
 pub(crate) const ENV_CACHE_MAX: &str = "STARFIELD_CACHE_MAX";
 pub(crate) const ENV_CONFIG_FILE: &str = "STARFIELD_DATASTORE_CONFIG";
+/// `op://vault/item` reference for the 1Password provider (feature
+/// `onepassword`); each host is a field of that item.
+#[cfg(feature = "onepassword")]
+pub(crate) const ENV_OP_ITEM: &str = "STARFIELD_OP_ITEM";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +52,9 @@ pub(crate) fn apply(mut builder: DatastoreBuilder) -> Result<DatastoreBuilder> {
     if builder.offline.is_none() {
         builder.offline = env_bool(ENV_OFFLINE)?.or(file.offline);
     }
+    if builder.credentials.is_none() {
+        builder.credentials = Some(default_credentials());
+    }
     if builder.max_bytes.is_none() {
         builder.max_bytes = match env_var(ENV_CACHE_MAX) {
             Some(raw) => Some(raw.parse().map_err(|_| {
@@ -54,6 +64,26 @@ pub(crate) fn apply(mut builder: DatastoreBuilder) -> Result<DatastoreBuilder> {
         };
     }
     Ok(builder)
+}
+
+/// What a client off the tailnet fetches upstream with (spec §2.4): its own
+/// `STARFIELD_TOKEN_<HOST>` variables and `~/.netrc`, plus 1Password when
+/// built in and `STARFIELD_OP_ITEM` names an item. Every provider looks its
+/// credential up lazily, per request, so nothing is read until the upstream
+/// layer is actually used.
+fn default_credentials() -> Box<dyn CredentialProvider> {
+    let chain: Vec<Box<dyn CredentialProvider>> =
+        vec![Box::new(EnvProvider), Box::new(NetrcProvider)];
+    #[cfg(feature = "onepassword")]
+    let chain = match env_var(ENV_OP_ITEM) {
+        Some(item) => {
+            let mut chain = chain;
+            chain.push(Box::new(crate::OnePasswordProvider { item }));
+            chain
+        }
+        None => chain,
+    };
+    Box::new(ChainProvider(chain))
 }
 
 fn read_file() -> Result<FileConfig> {

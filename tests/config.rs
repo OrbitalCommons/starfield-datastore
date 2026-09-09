@@ -2,7 +2,10 @@
 //! the config file, then defaults. One test, because the environment is
 //! process-global.
 
-use starfield_datastore::{Artifact, ArtifactKey, DatastoreBuilder, DatastoreError};
+mod support;
+
+use starfield_datastore::{Artifact, ArtifactKey, DatastoreBuilder, DatastoreError, Source};
+use support::stub::{Response, Stub};
 use tempfile::TempDir;
 
 #[test]
@@ -75,6 +78,51 @@ fn builder_beats_env_beats_file_beats_default() {
         ),
         "builder beats env"
     );
+
+    let archive = Stub::start("127.0.0.1");
+    archive.route("/k", Response::ok(vec![9u8; 2048]));
+    std::env::set_var("STARFIELD_TOKEN_127_0_0_1", "env-token");
+    std::env::set_var("HOME", dir.path());
+    let store = DatastoreBuilder::from_env()
+        .unwrap()
+        .cache_root(dir.path().join("creds"))
+        .progress(false)
+        .build()
+        .unwrap();
+    let fetched = Artifact::new(
+        ArtifactKey::new("k").unwrap(),
+        vec![Source::new(format!("{}/k", archive.url()))],
+    );
+    store.get(&fetched).unwrap();
+    let sent = archive.requests()[0].headers.get("authorization").cloned();
+    assert_eq!(
+        sent.as_deref(),
+        Some("Bearer env-token"),
+        "from_env wires the caller's own credentials for the upstream layer"
+    );
+    assert_eq!(
+        store
+            .entry(&fetched.key)
+            .unwrap()
+            .provider_identity
+            .as_deref(),
+        Some("env:127.0.0.1")
+    );
+    std::env::remove_var("STARFIELD_TOKEN_127_0_0_1");
+
+    let hermetic = starfield_datastore::Datastore::builder()
+        .cache_root(dir.path().join("hermetic"))
+        .allow_upstream(true)
+        .progress(false)
+        .build()
+        .unwrap();
+    std::env::set_var("STARFIELD_TOKEN_127_0_0_1", "env-token");
+    hermetic.get(&fetched).unwrap();
+    assert!(
+        !archive.requests()[1].headers.contains_key("authorization"),
+        "builder() alone reads nothing from the environment"
+    );
+    std::env::remove_var("STARFIELD_TOKEN_127_0_0_1");
 
     std::env::set_var("STARFIELD_OFFLINE", "sometimes");
     assert!(DatastoreBuilder::from_env().is_err());

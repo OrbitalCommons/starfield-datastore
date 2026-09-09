@@ -49,10 +49,15 @@ pub(crate) struct Download {
 }
 
 impl Fetcher {
+    /// `cookies` enables a per-host cookie jar. The upstream engine needs it
+    /// for Earthdata's login dance (the final hop is authorised by a cookie
+    /// set two redirects earlier); the mirror engine must not have one, so
+    /// nothing a mirror sets can ride along on the redirect it issues.
     pub(crate) fn new(
         timeout: Duration,
         provider: Option<Arc<dyn CredentialProvider>>,
         progress: Progress,
+        cookies: bool,
     ) -> Result<Self> {
         // `timeout(None)`: the blocking client defaults to a 30 s *total*
         // timeout, which would kill every large download.
@@ -60,7 +65,7 @@ impl Fetcher {
             .connect_timeout(timeout)
             .timeout(None)
             .redirect(Policy::none())
-            .cookie_store(true)
+            .cookie_store(cookies)
             .no_proxy()
             .user_agent(concat!("starfield-datastore/", env!("CARGO_PKG_VERSION")))
             .build()?;

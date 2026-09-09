@@ -196,7 +196,7 @@ impl DatastoreBuilder {
             (None, _) => Progress::Bars,
         };
         let provider: Option<Arc<dyn CredentialProvider>> = self.credentials.map(Arc::from);
-        let fetcher = Fetcher::new(timeout, provider, progress.clone())?;
+        let fetcher = Fetcher::new(timeout, provider, progress.clone(), true)?;
         let mirror = match self.mirror {
             Some(m) => Some(mirror::open(&m, timeout, progress)?),
             None => None,

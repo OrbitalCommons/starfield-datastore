@@ -31,7 +31,7 @@ impl HttpMirror {
         }
         Ok(Self {
             base: sanitize(base_url).trim_end_matches('/').to_string(),
-            fetcher: Fetcher::new(timeout, None, progress)?,
+            fetcher: Fetcher::new(timeout, None, progress, false)?,
         })
     }
 }

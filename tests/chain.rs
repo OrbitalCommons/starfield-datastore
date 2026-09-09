@@ -681,3 +681,68 @@ fn gc_racing_publication_never_leaves_dangling_keys() {
         "no orphans after gc"
     );
 }
+
+fn with_cookie(mut response: Response) -> Response {
+    response
+        .headers
+        .push(("Set-Cookie".into(), "session=abc; Path=/".into()));
+    response
+}
+
+fn cookies_seen(stub: &Stub, path: &str) -> Vec<Option<String>> {
+    stub.requests()
+        .iter()
+        .filter(|r| r.path == path)
+        .map(|r| r.headers.get("cookie").cloned())
+        .collect()
+}
+
+#[cfg(feature = "mirror-http")]
+#[test]
+fn mirror_engine_has_no_cookie_jar() {
+    let server = Stub::start("127.0.0.1");
+    let bytes = body(14, 2048);
+    let presigned = format!("{}/presigned/test/k?sig=1", server.url());
+    server.route("/artifact/test/k", with_cookie(redirect(&presigned)));
+    server.route("/presigned/test/k?sig=1", Response::ok(bytes.clone()));
+    let root = TempDir::new().unwrap();
+    let store = builder(&root)
+        .mirror(Mirror::Http {
+            base_url: server.url(),
+            writable: false,
+        })
+        .build()
+        .unwrap();
+    let artifact = Artifact::new(key("k"), vec![]);
+    let (path, outcome) = store.get_with_outcome(&artifact).unwrap();
+    assert_eq!(outcome.layer, Layer::Mirror);
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(
+        cookies_seen(&server, "/presigned/test/k?sig=1"),
+        vec![None],
+        "a cookie set by the mirror never rides along on its redirect"
+    );
+}
+
+#[test]
+fn upstream_engine_keeps_cookies_for_the_login_dance() {
+    let archive = Stub::start("127.0.0.1");
+    let bytes = body(15, 2048);
+    archive.route(
+        "/data",
+        with_cookie(redirect(&format!("{}/file", archive.url()))),
+    );
+    archive.route("/file", Response::ok(bytes.clone()));
+    let root = TempDir::new().unwrap();
+    let store = builder(&root).allow_upstream(true).build().unwrap();
+    let artifact = Artifact::new(
+        key("k"),
+        vec![Source::new(format!("{}/data", archive.url()))],
+    );
+    store.get(&artifact).unwrap();
+    assert_eq!(
+        cookies_seen(&archive, "/file"),
+        vec![Some("session=abc".into())],
+        "Earthdata authorises the final hop with a cookie set on an earlier one"
+    );
+}
