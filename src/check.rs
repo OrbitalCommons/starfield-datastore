@@ -67,6 +67,42 @@ impl ContentCheck {
         self.check_reader(&mut std::io::Cursor::new(bytes), bytes.len() as u64)
     }
 
+    /// Reject a wrong signature or HTML before downloading the remaining body.
+    /// Inconclusive short prefixes pass; `check_file` remains authoritative.
+    pub fn check_prefix(&self, head: &[u8]) -> std::result::Result<(), CheckFailure> {
+        match self {
+            Self::NotHtml => self.check(head),
+            Self::Magic {
+                prefixes,
+                trim_leading_whitespace,
+            } => {
+                let head = if *trim_leading_whitespace {
+                    head.trim_ascii_start()
+                } else {
+                    head
+                };
+                if prefixes
+                    .iter()
+                    .any(|prefix| head.starts_with(prefix) || prefix.starts_with(head))
+                {
+                    Ok(())
+                } else {
+                    Err(CheckFailure {
+                        check: "Magic".into(),
+                        got: "unexpected signature (body redacted)".into(),
+                    })
+                }
+            }
+            Self::All(checks) => {
+                for check in checks {
+                    check.check_prefix(head)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Built-in checks stream files; only a custom predicate loads the full body.
     pub fn check_file(&self, path: &Path) -> std::result::Result<(), CheckFailure> {
         if let Self::Sha256(expected) = self {
@@ -224,5 +260,19 @@ mod tests {
         }));
         assert!(check.check(&[1, 2, 3]).is_ok());
         assert_eq!(format!("{check:?}"), "Custom(<predicate>)");
+    }
+
+    #[test]
+    fn prefix_checks_reject_wrong_kind_and_defer_incomplete_validation() {
+        let check = ContentCheck::All(vec![
+            ContentCheck::NotHtml,
+            ContentCheck::MinBytes(10000),
+            ContentCheck::magic(vec![b"ABC".to_vec()], true),
+        ]);
+        assert!(check.check_prefix(b" \nA").is_ok());
+        assert!(check.check_prefix(b"XYZ").is_err());
+        assert!(check.check_prefix(b"<html>login</html>").is_err());
+        assert!(check.check_prefix(b"ABC").is_ok());
+        assert!(check.check(b"ABC").is_err());
     }
 }

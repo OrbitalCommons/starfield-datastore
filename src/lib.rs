@@ -14,6 +14,7 @@ mod artifact;
 mod check;
 mod credential;
 mod error;
+mod manifest;
 
 pub use artifact::{Artifact, ArtifactKey, Freshness, Provenance, Source};
 pub use check::{CheckFailure, ContentCheck};
@@ -24,3 +25,4 @@ pub use credential::{
     StaticProvider,
 };
 pub use error::{DatastoreError, Result};
+pub use manifest::Manifest;
