@@ -1,6 +1,7 @@
 # The SPICE kernels starfield needs (spec §15, step 5). Keys are archive-shaped
-# and stable; sources are where the bytes live today. `sha256` pins are written
-# back by `starfield-datastore mirror` once each artifact has been mirrored.
+# and stable; sources are where the bytes live today. `sha256` pins were taken
+# from a validated fetch of every artifact on 2026-09-09; `starfield-datastore
+# mirror` keeps them current.
 #
 # Checks reject the wrong kind of thing (an HTML page under a .bsp key); the
 # kernel parser validates the format. DAF ID words sit at bytes 0..8, so the
@@ -10,6 +11,7 @@
 [[artifact]]
 key = "naif/spk/de421.bsp"
 sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/a_old_versions/de421.bsp"]
+sha256 = "08b20db2ae22488650641c5a9033e5bfda4b1c4b440cfeaf20f621cfa18ecdb3"
 bytes = 16790528
 freshness = "immutable"
 check = { magic = ["DAF/SPK", "NAIF/DAF"], trim_leading_whitespace = false }
@@ -20,6 +22,7 @@ citation = "Folkner, W. M., Williams, J. G., Boggs, D. H. (2009). The Planetary 
 [[artifact]]
 key = "naif/spk/de440.bsp"
 sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440.bsp"]
+sha256 = "a4ce9bf9b3282becc9f4b2ac3cebe03a2ae7599981aabd7265fd8482fff7c4b5"
 bytes = 119799808
 freshness = "immutable"
 check = { magic = ["DAF/SPK", "NAIF/DAF"], trim_leading_whitespace = false }
@@ -30,6 +33,7 @@ citation = "Park, R. S., Folkner, W. M., Williams, J. G., Boggs, D. H. (2021). T
 [[artifact]]
 key = "naif/pck/pck00011.tpc"
 sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/pck00011.tpc"]
+sha256 = "3dff7b1dbeceaa01f25467767d3fa25816051c85d162d1edf04acb310ee28bb1"
 bytes = 131226
 freshness = "immutable"
 check = { magic = ["KPL/PCK", "KPL/FK"], trim_leading_whitespace = true }
@@ -39,6 +43,7 @@ license = "public-domain"
 [[artifact]]
 key = "naif/pck/moon_pa_de421_1900-2050.bpc"
 sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/moon_pa_de421_1900-2050.bpc"]
+sha256 = "656f90616403d75a75f0cd6c8830fc5b44f8cb4facb5ccb8915e752b397520cf"
 bytes = 1770496
 freshness = "immutable"
 check = { magic = ["DAF/PCK", "NAIF/DAF"], trim_leading_whitespace = false }
@@ -48,6 +53,7 @@ license = "public-domain"
 [[artifact]]
 key = "naif/fk/moon_080317.tf"
 sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/fk/satellites/moon_080317.tf"]
+sha256 = "78732477b96f9863e7b0d65bcee3c22b8707ca5ed0db56d1173319cb2e8c7993"
 bytes = 21437
 freshness = "immutable"
 check = { magic = ["KPL/PCK", "KPL/FK"], trim_leading_whitespace = true }
@@ -57,6 +63,7 @@ license = "public-domain"
 [[artifact]]
 key = "naif/lsk/naif0012.tls"
 sources = ["https://naif.jpl.nasa.gov/pub/naif/generic_kernels/lsk/naif0012.tls"]
+sha256 = "678e32bdb5a744117a467cd9601cd6b373f0e9bc9bbde1371d5eee39600a039b"
 bytes = 5257
 freshness = "immutable"
 check = { magic = ["KPL/LSK"], trim_leading_whitespace = true }

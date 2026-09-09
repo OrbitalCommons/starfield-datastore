@@ -359,8 +359,10 @@ impl Datastore {
         Ok(self.layout.blobs()?.iter().map(|(_, len)| len).sum())
     }
 
-    /// Rehash every blob; report keys whose content or size no longer
-    /// matches the sidecar. Exactly what `get` would refuse to serve.
+    /// Rehash every blob; report keys whose blob is missing, hashes to a
+    /// different digest, or has a size that disagrees with the sidecar.
+    /// These are the index-integrity checks `get` makes on a hit; the
+    /// artifact's own `ContentCheck` needs an `Artifact` and is not run here.
     pub fn verify(&self) -> Result<Vec<VerifyFailure>> {
         let mut failures = Vec::new();
         for (key, entry) in self.entries()? {

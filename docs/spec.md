@@ -479,8 +479,9 @@ pub struct IndexEntry {
     pub layer: Layer,
 }
 
-/// `verify` reports exactly what `get` would refuse: a missing blob, a
-/// digest mismatch, or a size that disagrees with the sidecar.
+/// `verify` reports index-integrity failures — a missing blob, a digest
+/// mismatch, or a size that disagrees with the sidecar — the same checks
+/// `get` makes on a hit before running the artifact's own `ContentCheck`.
 pub struct VerifyFailure {
     pub key: ArtifactKey,
     pub expected: String,        // digest the index records

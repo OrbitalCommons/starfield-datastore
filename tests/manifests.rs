@@ -29,6 +29,11 @@ fn ephemeris_manifest_round_trips_and_covers_the_loader_kernels() {
     for artifact in &manifest.artifacts {
         assert!(!artifact.sources.is_empty(), "{}", artifact.key);
         assert!(artifact.expected_bytes.is_some(), "{}", artifact.key);
+        assert!(
+            matches!(&artifact.check, ContentCheck::All(checks) if matches!(checks.first(), Some(ContentCheck::Sha256(_)))),
+            "{} is pinned",
+            artifact.key
+        );
         assert_eq!(artifact.provenance.license, "public-domain");
         assert!(!artifact.provenance.description.is_empty());
     }
@@ -39,12 +44,19 @@ fn ephemeris_manifest_round_trips_and_covers_the_loader_kernels() {
 #[test]
 fn kernel_checks_reject_the_wrong_kind_and_accept_both_daf_id_words() {
     let manifest = ephemeris();
+    // Every entry is `All([Sha256(pin), kind-check])`; exercise the kind
+    // check on synthetic bytes, since only real kernels satisfy the pin.
     let check = |key: &str| -> ContentCheck {
-        manifest
+        let pinned = manifest
             .get(&ArtifactKey::new(key).unwrap())
             .unwrap()
             .check
-            .clone()
+            .clone();
+        let ContentCheck::All(checks) = pinned else {
+            panic!("{key}: expected a pinned check");
+        };
+        assert!(matches!(checks[0], ContentCheck::Sha256(_)));
+        checks[1].clone()
     };
     let html = "<html><body>login</body></html>".repeat(100);
 
