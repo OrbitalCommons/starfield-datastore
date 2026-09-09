@@ -46,7 +46,6 @@ impl S3Mirror {
         prefix: impl Into<String>,
         region: impl Into<String>,
     ) -> Result<Self> {
-        ensure_blocking()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -81,13 +80,12 @@ impl S3Mirror {
         })
     }
 
-    fn runtime(&self) -> Result<&tokio::runtime::Runtime> {
-        ensure_blocking()?;
-        Ok(self.runtime.as_ref().expect("runtime exists until drop"))
+    fn runtime(&self) -> &tokio::runtime::Runtime {
+        self.runtime.as_ref().expect("runtime exists until drop")
     }
 
     pub fn head(&self, key: &ArtifactKey) -> Result<Option<MirrorObject>> {
-        self.runtime()?.block_on(self.head_async(key))
+        self.runtime().block_on(self.head_async(key))
     }
 
     async fn head_async(&self, key: &ArtifactKey) -> Result<Option<MirrorObject>> {
@@ -146,7 +144,7 @@ impl S3Mirror {
     /// Streams bytes into a caller-owned temporary file. The caller validates
     /// them before publication, just as for HTTP mirrors.
     pub fn fetch(&self, key: &ArtifactKey, sink: &mut dyn Write) -> Result<bool> {
-        self.runtime()?.block_on(async {
+        self.runtime().block_on(async {
             let response = self
                 .client
                 .get_object()
@@ -190,7 +188,7 @@ impl S3Mirror {
                 "presigned expiry must be between 5 and 15 minutes".into(),
             ));
         }
-        self.runtime()?.block_on(async {
+        self.runtime().block_on(async {
             let config = PresigningConfig::expires_in(expiry)
                 .map_err(|_| mirror_error("invalid presigning expiry"))?;
             let request = self
@@ -239,7 +237,7 @@ impl S3Mirror {
             ));
         }
         let metadata = upload_metadata(meta)?;
-        self.runtime()?.block_on(async {
+        self.runtime().block_on(async {
             if expected_etag.is_none() {
                 if let Some(existing) = self.head_async(key).await? {
                     return matching_existing(&existing, meta);
@@ -427,14 +425,6 @@ impl Drop for S3Mirror {
     }
 }
 
-fn ensure_blocking() -> Result<()> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return Err(DatastoreError::Config(
-            "synchronous S3 operations require a blocking thread".into(),
-        ));
-    }
-    Ok(())
-}
 fn mirror_error(message: &str) -> DatastoreError {
     DatastoreError::Mirror(message.into())
 }
@@ -697,6 +687,22 @@ mod tests {
             .query_pairs()
             .any(|(k, v)| k == "X-Amz-Security-Token" && v == "test-session"));
         assert!(mirror.presign_get(&key, Duration::from_secs(1)).is_err());
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn synchronous_transport_works_from_server_blocking_pool() {
+        let (mirror, _, thread) = stub(vec![Reply::new(404, "")]);
+        let outer = tokio::runtime::Runtime::new().unwrap();
+        outer.block_on(async move {
+            let missing = tokio::task::spawn_blocking(move || {
+                mirror.head(&ArtifactKey::new("missing").unwrap())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(missing.is_none());
+        });
         thread.join().unwrap();
     }
     #[test]
