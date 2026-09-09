@@ -578,6 +578,15 @@ same artifact both end at the same final path.
 - The three credential rules (§6) and the redirect behaviour of
   `Mirror::Http` are unit-tested with `StaticProvider` and a local HTTP stub.
 - Manifest round-trip is tested for the declarative `ContentCheck` set.
+- **The upstream layer is a first-class, tested path**, not an escape hatch:
+  the default suite exercises it against a local HTTP stub (redirect handling,
+  validation, local-only fill under `STARFIELD_ALLOW_UPSTREAM`). focalplane's
+  CI runs on plain GitHub-hosted runners with no tailnet and resolves every
+  artifact this way, including large kernels and mosaic tiers.
+- **A cache hit and an upstream fetch are byte-identical by construction**, and
+  a test says so: blobs are stored under their SHA-256, a manifest `sha256` is
+  verified on every layer, and `verify` rehashes the local store. Consumers
+  that pin by content (focalplane, the datasource crates) rely on this.
 
 ## 15. Rollout
 
