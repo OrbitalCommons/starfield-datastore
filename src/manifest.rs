@@ -59,14 +59,28 @@ fn invalid(message: &str) -> DatastoreError {
 impl Manifest {
     pub fn from_toml_str(s: &str) -> Result<Self> {
         // Parser errors can include source lines with tokens; never echo them.
-        let document: Document =
-            toml::from_str(s).map_err(|_| invalid("invalid TOML manifest or unknown field"))?;
+        let document: Document = toml::from_str(s).map_err(|error: toml::de::Error| {
+            let offset = error
+                .span()
+                .map(|span| span.start)
+                .unwrap_or(0)
+                .min(s.len());
+            let before = &s.as_bytes()[..offset];
+            let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+            let column = before
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(offset + 1, |n| offset - n);
+            invalid(&format!(
+                "invalid TOML or unknown field at line {line}, column {column}"
+            ))
+        })?;
         let mut seen = HashSet::new();
         let mut artifacts = Vec::new();
         for entry in document.artifacts {
             let key = ArtifactKey::new(entry.key)?;
             if !seen.insert(key.clone()) {
-                return Err(invalid("duplicate artifact key"));
+                return Err(invalid(&format!("duplicate artifact key {key}")));
             }
             if entry.freshness != "immutable" {
                 return Err(invalid("only immutable freshness is supported"));
@@ -80,12 +94,12 @@ impl Manifest {
                         trust_redirects: s.trust_redirects,
                     },
                 };
-                validate_url(&source.url)?;
+                validate_url(&source.url).map_err(|e| invalid(&format!("artifact {key}: {e}")))?;
                 sources.push(source);
             }
             let mut check = entry
                 .check
-                .map(|v| parse_check(&v, 0))
+                .map(|v| parse_check(&v, 0).map_err(|e| invalid(&format!("artifact {key}: {e}"))))
                 .transpose()?
                 .unwrap_or_else(ContentCheck::default_binary);
             if let Some(digest) = entry.sha256 {
@@ -110,6 +124,7 @@ impl Manifest {
 
     pub fn from_path(path: &Path) -> Result<Self> {
         Self::from_toml_str(&std::fs::read_to_string(path)?)
+            .map_err(|e| invalid(&format!("{}: {e}", path.display())))
     }
 
     pub fn to_toml_string(&self) -> Result<String> {
@@ -173,7 +188,7 @@ impl Manifest {
             .artifacts
             .iter_mut()
             .find(|a| &a.key == key)
-            .ok_or_else(|| invalid("cannot pin unknown key"))?;
+            .ok_or_else(|| invalid(&format!("cannot pin unknown key {key}")))?;
         ensure_compatible_pin(&artifact.check, digest)?;
         let (pin, check) = split_pin(&artifact.check);
         if pin.as_deref() == Some(digest) {
@@ -477,5 +492,21 @@ mod tests {
             ["x", "y", "z"]
         );
         assert!(manifest.artifacts[1].check.check(b"").is_ok());
+    }
+
+    #[test]
+    fn manual_artifact_size_round_trips_and_parse_errors_locate_without_echoing() {
+        let manifest = Manifest::from_toml_str(
+            "[[artifact]]\nkey='manual/table'\nsources=[]\nbytes=42\ncheck={none=true}\n",
+        )
+        .unwrap();
+        let copy = Manifest::from_toml_str(&manifest.to_toml_string().unwrap()).unwrap();
+        assert!(copy.artifacts[0].sources.is_empty());
+        assert_eq!(copy.artifacts[0].expected_bytes, Some(42));
+        let error = Manifest::from_toml_str("[[artifact]]\nkey='x'\npassword='sensitive'\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("line"));
+        assert!(!error.contains("sensitive"));
     }
 }
