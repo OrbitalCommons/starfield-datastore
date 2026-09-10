@@ -56,7 +56,12 @@ impl DatastoreConfig {
     }
 
     pub fn from_path(path: &std::path::Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)?;
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            DatastoreError::Config(format!(
+                "cannot read configuration {}: {error}; supply --config or mount the file at this path",
+                path.display()
+            ))
+        })?;
         let mut config = Self::from_toml_str(&text)?;
         let base = std::fs::canonicalize(path)?;
         let parent = base.parent().expect("a config file has a parent");

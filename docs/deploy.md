@@ -266,6 +266,11 @@ skipped, and reported by name/type without logging their payload. Unknown
 payloads support JSON-compatible TOML values; datetime literals must be quoted
 as strings. Malformed known types and unknown credential references are errors.
 
+When profiles use different credentials for the same host, select one with
+`--service` or `DatastoreConfig::builder_for_service`. Plain `from_env()` uses
+the global selection and refuses ambiguous hosts rather than choosing an
+account implicitly.
+
 CLI flags override profile values. For region, flags override AWS environment
 variables, which override the profile. Existing cache-setting environment
 overrides still apply. Relative manifest/cache paths resolve beside the config
