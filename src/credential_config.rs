@@ -4,7 +4,7 @@
 //! validated when the file is loaded. An entry of a type this build does not
 //! recognise is kept verbatim so the file round-trips, contributes no
 //! credential and no identity, and is reported — by name and type, never by
-//! content — so the operator can warn at startup. No entry ever carries a
+//! content — so the operator can warn at startup. No known entry carries a
 //! literal secret: passwords and tokens are named by environment variable,
 //! `.netrc`, or a 1Password reference, and every secret is read at request
 //! time so rotation needs no restart.
