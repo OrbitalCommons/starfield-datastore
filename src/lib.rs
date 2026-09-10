@@ -14,6 +14,7 @@ mod artifact;
 mod check;
 mod config;
 mod credential;
+mod credential_config;
 mod error;
 mod fetch;
 mod manifest;
@@ -31,6 +32,9 @@ pub use credential::OnePasswordProvider;
 pub use credential::{
     ChainProvider, Credential, CredentialProvider, EnvProvider, NetrcProvider, Secret,
     StaticProvider,
+};
+pub use credential_config::{
+    configured_provider, validate_entries, CredentialConfig, CredentialSource, SkippedCredential,
 };
 pub use error::{DatastoreError, Result};
 pub use manifest::Manifest;
