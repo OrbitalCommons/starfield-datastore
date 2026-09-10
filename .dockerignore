@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!manifests/
+!manifests/ephemeris.toml

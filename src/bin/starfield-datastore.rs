@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use starfield_datastore::{
-    ArtifactKey, Datastore, DatastoreBuilder, DatastoreError, Manifest, Result,
+    ArtifactKey, Datastore, DatastoreBuilder, DatastoreConfig, DatastoreError, Manifest, Result,
+    ServiceConfig,
 };
 use std::path::PathBuf;
 #[cfg(feature = "mirror-s3")]
@@ -9,6 +10,12 @@ use std::{io::Write, path::Path};
 #[derive(Parser)]
 #[command(version, about = "Validated artifact cache and ephemeris mirror")]
 struct Args {
+    /// One configuration file for cache, service profiles, and credentials.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    /// Named service profile in the configuration file.
+    #[arg(long, global = true)]
+    service: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -23,14 +30,14 @@ enum Command {
     /// Resolve an artifact into the local cache.
     Fetch {
         #[arg(long)]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
         #[arg(long)]
         key: String,
     },
     /// Seed an artifact from a manually obtained or legacy cache file.
     Import {
         #[arg(long)]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
         #[arg(long)]
         key: String,
         #[arg(long)]
@@ -49,7 +56,7 @@ enum Command {
     /// Rehash content and apply manifest checks; repair requires explicit opt-in.
     Verify {
         #[arg(long)]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
         #[arg(long)]
         at: Option<String>,
         #[arg(long)]
@@ -61,9 +68,9 @@ enum Command {
     /// Prewarm S3 from the manifest and atomically write back digest pins.
     Mirror {
         #[arg(long)]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
         #[arg(long)]
-        to: String,
+        to: Option<String>,
         #[arg(long)]
         region: Option<String>,
     },
@@ -71,14 +78,73 @@ enum Command {
     /// Serve the manifest on a loopback or tailnet address.
     Serve {
         #[arg(long)]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
         #[arg(long)]
-        bucket: String,
+        bucket: Option<String>,
         #[arg(long)]
         region: Option<String>,
-        #[arg(long, default_value = "127.0.0.1:8080")]
-        bind: std::net::SocketAddr,
+        #[arg(long)]
+        bind: Option<std::net::SocketAddr>,
     },
+}
+
+struct Settings {
+    config: DatastoreConfig,
+    service: Option<String>,
+    profile: ServiceConfig,
+}
+
+impl Settings {
+    fn load(path: Option<PathBuf>, service: Option<String>) -> Result<Self> {
+        let config = match path {
+            Some(path) => DatastoreConfig::from_path(&path)?,
+            None => DatastoreConfig::from_env()?,
+        };
+        let service = service.or_else(|| {
+            (config.services.len() == 1).then(|| config.services.keys().next().unwrap().clone())
+        });
+        let profile = match &service {
+            Some(name) => config
+                .services
+                .get(name)
+                .cloned()
+                .ok_or_else(|| DatastoreError::Config(format!("unknown service {name}")))?,
+            None => ServiceConfig::default(),
+        };
+        Ok(Self {
+            config,
+            service,
+            profile,
+        })
+    }
+
+    fn builder(&self) -> Result<DatastoreBuilder> {
+        match &self.service {
+            Some(name) => self.config.builder_for_service(name),
+            None => self.config.builder(),
+        }
+    }
+
+    fn manifest(&self, flag: Option<PathBuf>) -> Result<PathBuf> {
+        flag.or_else(|| self.profile.manifest.clone())
+            .ok_or_else(|| {
+                DatastoreError::Config("set --manifest or select a service with a manifest".into())
+            })
+    }
+
+    #[cfg(feature = "mirror-s3")]
+    fn bucket(&self, flag: Option<String>) -> Result<String> {
+        flag.or_else(|| self.profile.bucket.clone()).ok_or_else(|| {
+            DatastoreError::Config("set --bucket/--to or select a service with a bucket".into())
+        })
+    }
+
+    #[cfg(feature = "mirror-s3")]
+    fn region(&self, flag: Option<String>) -> Option<String> {
+        flag.or_else(|| std::env::var("AWS_REGION").ok())
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+            .or_else(|| self.profile.region.clone())
+    }
 }
 
 fn main() {
@@ -89,8 +155,9 @@ fn main() {
 }
 
 #[cfg(feature = "mirror-s3")]
-fn upstream_store() -> Result<Datastore> {
-    DatastoreBuilder::from_env()?
+fn upstream_store(settings: &Settings) -> Result<Datastore> {
+    settings
+        .builder()?
         .without_mirror()
         .allow_upstream(true)
         .offline(false)
@@ -98,44 +165,43 @@ fn upstream_store() -> Result<Datastore> {
 }
 
 fn run(args: Args) -> Result<()> {
+    let settings = Settings::load(args.config, args.service)?;
     match args.command {
         Command::Remove { key } => {
-            Datastore::from_env()?.remove(&ArtifactKey::new(key)?)?;
+            settings
+                .builder()?
+                .build()?
+                .remove(&ArtifactKey::new(key)?)?;
         }
         Command::Fetch { manifest, key } => {
-            let manifest = Manifest::from_path(&manifest)?;
+            let manifest = Manifest::from_path(&settings.manifest(manifest)?)?;
             let key = ArtifactKey::new(key)?;
             let artifact = manifest
                 .get(&key)
                 .ok_or_else(|| DatastoreError::Manifest(format!("unknown artifact {key}")))?;
-            println!(
-                "{}",
-                DatastoreBuilder::from_env()?
-                    .build()?
-                    .get(artifact)?
-                    .display()
-            );
+            println!("{}", settings.builder()?.build()?.get(artifact)?.display());
         }
         Command::Import {
             manifest,
             key,
             from,
         } => {
-            let manifest = Manifest::from_path(&manifest)?;
+            let manifest = Manifest::from_path(&settings.manifest(manifest)?)?;
             let key = ArtifactKey::new(key)?;
             let artifact = manifest
                 .get(&key)
                 .ok_or_else(|| DatastoreError::Manifest(format!("unknown artifact {key}")))?;
             println!(
                 "{}",
-                DatastoreBuilder::from_env()?
+                settings
+                    .builder()?
                     .build()?
                     .import(artifact, &from)?
                     .display()
             );
         }
         Command::List { bytes } => {
-            let store = Datastore::from_env()?;
+            let store = settings.builder()?.build()?;
             for key in store.keys()? {
                 if bytes {
                     if let Some(entry) = store.entry(&key) {
@@ -147,7 +213,7 @@ fn run(args: Args) -> Result<()> {
             }
         }
         Command::Gc { max_bytes } => {
-            let store = Datastore::from_env()?;
+            let store = settings.builder()?.build()?;
             let max = max_bytes.or(store.max_bytes()).ok_or_else(|| {
                 DatastoreError::Config("gc needs --max-bytes or STARFIELD_CACHE_MAX".into())
             })?;
@@ -161,12 +227,17 @@ fn run(args: Args) -> Result<()> {
             repair,
             region,
         } => {
-            let manifest = Manifest::from_path(&manifest)?;
+            let manifest = Manifest::from_path(&settings.manifest(manifest)?)?;
             match at {
-                None => verify_local(&manifest, repair)?,
+                None => verify_local(&settings, &manifest, repair)?,
                 Some(target) => {
                     #[cfg(feature = "mirror-s3")]
-                    verify_s3(&manifest, &s3_target(&target, region)?, repair)?;
+                    verify_s3(
+                        &settings,
+                        &manifest,
+                        &s3_target(&target, settings.region(region))?,
+                        repair,
+                    )?;
                     #[cfg(not(feature = "mirror-s3"))]
                     {
                         let _ = (target, region);
@@ -182,7 +253,11 @@ fn run(args: Args) -> Result<()> {
             manifest,
             to,
             region,
-        } => mirror_manifest(&manifest, &s3_target(&to, region)?)?,
+        } => mirror_manifest(
+            &settings,
+            &settings.manifest(manifest)?,
+            &s3_target(&settings.bucket(to)?, settings.region(region))?,
+        )?,
         #[cfg(feature = "server")]
         Command::Serve {
             manifest,
@@ -191,18 +266,19 @@ fn run(args: Args) -> Result<()> {
             bind,
         } => {
             starfield_datastore::server::serve(
-                Manifest::from_path(&manifest)?,
-                upstream_store()?,
-                s3_target(&bucket, region)?,
-                bind,
+                Manifest::from_path(&settings.manifest(manifest)?)?,
+                upstream_store(&settings)?,
+                s3_target(&settings.bucket(bucket)?, settings.region(region))?,
+                bind.or(settings.profile.bind)
+                    .unwrap_or_else(|| "127.0.0.1:8080".parse().unwrap()),
             )?;
         }
     }
     Ok(())
 }
 
-fn verify_local(manifest: &Manifest, repair: bool) -> Result<()> {
-    let store = DatastoreBuilder::from_env()?.offline(true).build()?;
+fn verify_local(settings: &Settings, manifest: &Manifest, repair: bool) -> Result<()> {
+    let store = settings.builder()?.offline(true).build()?;
     let mut failed = Vec::new();
     for artifact in &manifest.artifacts {
         match store.get(artifact) {
@@ -245,7 +321,7 @@ fn verify_local(manifest: &Manifest, repair: bool) -> Result<()> {
     for artifact in &failed {
         store.remove(&artifact.key)?;
     }
-    let store = DatastoreBuilder::from_env()?.build()?;
+    let store = settings.builder()?.build()?;
     for artifact in failed {
         store.get(artifact)?;
         println!("repaired {}", artifact.key);
@@ -294,7 +370,11 @@ fn metadata(store: &Datastore, key: &ArtifactKey) -> Result<starfield_datastore:
 }
 
 #[cfg(feature = "mirror-s3")]
-fn mirror_manifest(path: &Path, mirror: &starfield_datastore::S3Mirror) -> Result<()> {
+fn mirror_manifest(
+    settings: &Settings,
+    path: &Path,
+    mirror: &starfield_datastore::S3Mirror,
+) -> Result<()> {
     let lock = std::fs::File::options()
         .create(true)
         .truncate(false)
@@ -302,7 +382,7 @@ fn mirror_manifest(path: &Path, mirror: &starfield_datastore::S3Mirror) -> Resul
         .open(path.with_extension("lock"))?;
     fs2::FileExt::lock_exclusive(&lock)?;
     let mut manifest = Manifest::from_path(path)?;
-    let store = upstream_store()?;
+    let store = upstream_store(settings)?;
     for artifact in manifest.artifacts.clone() {
         if artifact.provenance.license.trim().is_empty() {
             return Err(DatastoreError::Manifest(format!(
@@ -337,18 +417,16 @@ fn atomic_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
 
 #[cfg(feature = "mirror-s3")]
 fn verify_s3(
+    settings: &Settings,
     manifest: &Manifest,
     mirror: &starfield_datastore::S3Mirror,
     repair: bool,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
     let mut failed = 0;
-    let verification_cache = DatastoreBuilder::from_env()?
-        .without_mirror()
-        .offline(true)
-        .build()?;
+    let verification_cache = settings.builder()?.without_mirror().offline(true).build()?;
     let store = if repair {
-        Some(upstream_store()?)
+        Some(upstream_store(settings)?)
     } else {
         None
     };

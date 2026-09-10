@@ -1,0 +1,40 @@
+# Mount this file at /etc/starfield-datastore/config.toml in the container.
+# Native installations can use the same file, adjusting the manifest path.
+cache_dir = "/var/lib/starfield-datastore/cache"
+allow_upstream = false
+offline = false
+
+[[credentials]]
+name = "earthdata"
+hosts = ["urs.earthdata.nasa.gov"]
+type = "netrc"
+
+[[credentials]]
+name = "mast"
+hosts = ["mast.stsci.edu", "archive.stsci.edu"]
+type = "env"
+variable = "MAST_TOKEN"
+
+[services.ephemeris]
+manifest = "/usr/share/starfield-datastore/ephemeris.toml"
+bucket = "s3://replace-me/ephemeris"
+region = "us-west-2"
+# Use the host's tailnet address for remote clients. Public binds are refused.
+bind = "127.0.0.1:8080"
+credentials = ["earthdata", "mast"]
+
+# Add more profiles without introducing another configuration file:
+# [services.catalogs]
+# manifest = "/etc/starfield-datastore/catalogs.toml"
+# bucket = "s3://replace-me/catalogs"
+# region = "us-west-2"
+# bind = "127.0.0.1:8081"
+# credentials = ["mast"]
+
+# Unknown credential types are preserved as JSON values on round-trip, skipped
+# during resolution, and warned about without printing their payloads.
+# [[credentials]]
+# name = "future-provider"
+# hosts = ["archive.example.org"]
+# type = "future"
+# settings = { audience = "science" }

@@ -25,6 +25,112 @@ fn success(output: Output) -> String {
 }
 
 #[test]
+fn one_config_selects_profiles_and_resolves_only_their_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let stub = support::stub::Stub::start("127.0.0.1");
+    stub.route("/one", support::stub::Response::ok(vec![7; 2048]));
+    stub.route("/two", support::stub::Response::ok(vec![8; 2048]));
+    std::fs::write(root.path().join("artifacts.toml"), format!(
+        "[[artifact]]\nkey='one'\nsources=['{}/one']\n[[artifact]]\nkey='two'\nsources=['{}/two']\n", stub.url(), stub.url()
+    )).unwrap();
+    let config = root.path().join("services.toml");
+    std::fs::write(
+        &config,
+        r#"
+allow_upstream = true
+[[credentials]]
+name = "first"
+hosts = ["127.0.0.1"]
+type = "env"
+variable = "SFD_FIRST_TOKEN"
+[[credentials]]
+name = "second"
+hosts = ["127.0.0.1"]
+type = "env"
+variable = "SFD_SECOND_TOKEN"
+[[credentials]]
+name = "future"
+hosts = ["127.0.0.1"]
+type = "future-auth"
+opaque = "must-not-be-logged"
+[services.one]
+manifest = "artifacts.toml"
+credentials = ["first"]
+[services.two]
+manifest = "artifacts.toml"
+credentials = ["second"]
+[services.preview]
+manifest = "artifacts.toml"
+credentials = ["future"]
+"#,
+    )
+    .unwrap();
+    for (service, variable, token) in [
+        ("one", "SFD_FIRST_TOKEN", "first"),
+        ("two", "SFD_SECOND_TOKEN", "second"),
+    ] {
+        success(
+            Command::new(env!("CARGO_BIN_EXE_starfield-datastore"))
+                .env_clear()
+                .env("STARFIELD_CACHE_DIR", root.path().join("cache"))
+                .env(variable, token)
+                .args([
+                    "--config",
+                    config.to_str().unwrap(),
+                    "--service",
+                    service,
+                    "fetch",
+                    "--key",
+                    service,
+                ])
+                .output()
+                .unwrap(),
+        );
+    }
+    let requests = stub.requests();
+    assert_eq!(
+        requests[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer first")
+    );
+    assert_eq!(
+        requests[1].headers.get("authorization").map(String::as_str),
+        Some("Bearer second")
+    );
+    let skipped = run(
+        root.path(),
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--service",
+            "preview",
+            "list",
+        ],
+    );
+    assert!(skipped.status.success());
+    let warning = String::from_utf8(skipped.stderr).unwrap();
+    assert!(warning.contains("future-auth") && warning.contains("skipped"));
+    assert!(!warning.contains("must-not-be-logged"));
+    let flags_win = run(
+        root.path(),
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--service",
+            "preview",
+            "fetch",
+            "--manifest",
+            "missing-override.toml",
+            "--key",
+            "one",
+        ],
+    );
+    assert!(
+        !flags_win.status.success(),
+        "explicit manifest flag overrides the profile"
+    );
+}
+
+#[test]
 fn commands_import_fetch_verify_list_and_gc_without_network() {
     let root = tempfile::tempdir().unwrap();
     let manifest = root.path().join("manifest.toml");

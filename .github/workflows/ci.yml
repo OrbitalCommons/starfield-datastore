@@ -51,3 +51,48 @@ jobs:
 
       - name: Verify the crate packages standalone
         run: cargo publish --dry-run
+
+  container:
+    name: Container Image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: starfield-datastore:ci
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=container-amd64
+          cache-to: type=gha,mode=max,scope=container-amd64
+      - name: Test the built image
+        run: bash tests/container.sh starfield-datastore:ci
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker tag starfield-datastore:ci "$image:sha-$GITHUB_SHA"
+          docker push "$image:sha-$GITHUB_SHA"
+          # Every push gets its immutable tag; an older run cannot move latest back.
+          current_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [[ "$current_main" == "$GITHUB_SHA" ]]; then
+            docker tag starfield-datastore:ci "$image:main"
+            docker tag starfield-datastore:ci "$image:latest"
+            docker push "$image:main"
+            docker push "$image:latest"
+          fi
+          echo "Published \`$image:sha-$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"

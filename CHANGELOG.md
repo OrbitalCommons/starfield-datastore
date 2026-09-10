@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 — 2026-09-10
+
+- Add one-file service profiles and lazy named credential sources, with
+  preserved unknown types that are skipped with a redacted startup warning.
+- Add a non-root Docker image and gated GHCR publication on every main push.
+- Support config/profile selection and flag overrides across CLI commands.
+
 ## 0.1.0 — 2026-09-09
 
 Breaking release replacing the 0.0.1 placeholder with the datastore API.
