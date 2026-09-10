@@ -41,7 +41,9 @@ pub enum CredentialSource {
     /// `op read <reference>` at request time (feature `onepassword`).
     OnePassword { reference: String },
     /// A type this build does not know. Preserved exactly, including its
-    /// `type`, so the file round-trips; using it is an error.
+    /// `type`, so the file round-trips. `configured_provider` skips it and
+    /// reports it for a startup warning; it grants no credential and no
+    /// identity, and its content is never inspected or printed.
     Unrecognized(Value),
 }
 
@@ -143,6 +145,14 @@ fn decode_source(
         Some(_) => return Err(format!("credential \"{name}\": `type` must be a string")),
         None => return Err(format!("credential \"{name}\" has no `type`")),
     };
+    if !matches!(kind.as_str(), "env" | "basic" | "netrc" | "onepassword") {
+        if contains_toml_datetime(&Value::Object(raw.clone())) {
+            return Err(format!(
+                "credential \"{name}\" (type {kind}): datetime values are not supported in credential entries"
+            ));
+        }
+        return Ok(CredentialSource::Unrecognized(Value::Object(raw)));
+    }
     for key in LITERAL_SECRET_KEYS {
         if raw.contains_key(key) {
             return Err(format!(
@@ -178,8 +188,21 @@ fn decode_source(
                 serde_json::from_value(fields).map_err(malformed)?;
             CredentialSource::OnePassword { reference }
         }
-        _ => CredentialSource::Unrecognized(Value::Object(raw)),
+        _ => unreachable!("unknown kinds return above"),
     })
+}
+
+/// TOML datetimes cannot survive a trip through `serde_json::Value`: they
+/// arrive as a privately tagged map and would be re-emitted as a table.
+fn contains_toml_datetime(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.keys().any(|k| k.starts_with("$__toml_private_"))
+                || map.values().any(contains_toml_datetime)
+        }
+        Value::Array(items) => items.iter().any(contains_toml_datetime),
+        _ => false,
+    }
 }
 
 impl Serialize for CredentialConfig {
@@ -218,6 +241,12 @@ impl Serialize for CredentialConfig {
                     )));
                 };
                 for (key, value) in fields {
+                    if key == "name" || key == "hosts" {
+                        return Err(serde::ser::Error::custom(format!(
+                            "credential \"{}\": unrecognised source must not carry a `{key}` key",
+                            self.name
+                        )));
+                    }
                     map.insert(key.clone(), value.clone());
                 }
             }
@@ -533,6 +562,34 @@ nested = 1
             !err.contains("sup3r"),
             "a literal secret is never echoed: {err}"
         );
+        let err = bad("type = \"future\"\nissued = 2026-09-10T00:00:00Z");
+        assert!(err.contains("datetime"), "{err}");
+
+        // An unknown type may use any field names, including ones that
+        // would be literal secrets for a known type; it is never inspected.
+        let doc = toml::from_str::<Doc>(
+            "[[credential]]\nname = \"x\"\nhosts = [\"h\"]\ntype = \"future\"\ntoken = \"opaque\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            doc.credential[0].source,
+            CredentialSource::Unrecognized(_)
+        ));
+        let (provider, skipped) = configured_provider(doc.credential).unwrap();
+        assert_eq!(skipped[0].kind, "future");
+        assert!(provider.credential_for("h").unwrap().is_none());
+
+        let clash = Doc {
+            credential: vec![CredentialConfig {
+                name: "x".into(),
+                hosts: vec!["h".into()],
+                source: CredentialSource::Unrecognized(serde_json::json!({
+                    "type": "future", "hosts": ["evil"]
+                })),
+            }],
+        };
+        let err = toml::to_string(&clash).unwrap_err().to_string();
+        assert!(err.contains("`hosts`"), "{err}");
         assert!(bad("variable = \"V\"").contains("has no `type`"));
         assert!(bad("type = 3").contains("must be a string"));
     }
@@ -642,13 +699,34 @@ nested = 1
                 .as_deref(),
             Some("config:earthdata")
         );
-        std::env::remove_var("USGS_PW");
+        let (provider, _) = configured_provider(vec![CredentialConfig {
+            name: "usgs".into(),
+            hosts: vec!["astrogeology.usgs.gov".into()],
+            source: CredentialSource::Basic {
+                username: "person".into(),
+                password_env: "CREDENTIAL_CONFIG_TEST_USGS_PW".into(),
+            },
+        }])
+        .unwrap();
+        std::env::remove_var("CREDENTIAL_CONFIG_TEST_USGS_PW");
         let err = provider
             .credential_for("astrogeology.usgs.gov")
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("USGS_PW") && err.contains("\"usgs\""), "{err}");
+        assert!(
+            err.contains("CREDENTIAL_CONFIG_TEST_USGS_PW") && err.contains("\"usgs\""),
+            "{err}"
+        );
+        std::env::set_var("CREDENTIAL_CONFIG_TEST_USGS_PW", "pw");
+        let Some(Credential::Basic { user, secret }) =
+            provider.credential_for("astrogeology.usgs.gov").unwrap()
+        else {
+            panic!("basic entry resolves once the variable is set");
+        };
+        assert_eq!((user.as_str(), secret.expose()), ("person", "pw"));
+        std::env::remove_var("CREDENTIAL_CONFIG_TEST_USGS_PW");
+        std::env::remove_var("CREDENTIAL_CONFIG_TEST_MAST");
     }
 
     #[test]
