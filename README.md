@@ -128,6 +128,11 @@ versions, never git revisions; their rollout is tracked separately.
 
 ## Development
 
+The [container deployment guide](docs/deploy.md#10-container-image-and-one-file-configuration)
+covers `ghcr.io/orbitalcommons/starfield-datastore`, automatically published on
+every push to main after tests. One [configuration file](deploy/config.toml)
+defines cache settings, named services, and lazy credential sources.
+
 ```
 cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings

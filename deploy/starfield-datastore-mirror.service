@@ -8,11 +8,8 @@ Wants=network-online.target
 Type=oneshot
 User=starfield
 Group=starfield
-EnvironmentFile=/etc/starfield-datastore/env
-ExecStart=/usr/local/bin/starfield-datastore mirror \
-  --manifest /etc/starfield-datastore/ephemeris.toml \
-  --to ${STARFIELD_BUCKET} \
-  --region ${AWS_REGION}
+EnvironmentFile=-/etc/starfield-datastore/env
+ExecStart=/usr/local/bin/starfield-datastore --config /etc/starfield-datastore/config.toml --service ephemeris mirror
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only

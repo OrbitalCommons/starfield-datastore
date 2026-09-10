@@ -92,10 +92,12 @@ sudo useradd --system --home /var/lib/starfield-datastore --shell /usr/sbin/nolo
 sudo install -d -o starfield -g starfield -m 0750 /var/lib/starfield-datastore /var/lib/starfield-datastore/cache
 sudo install -d -o starfield -g starfield -m 0750 /etc/starfield-datastore
 sudo install -o starfield -g starfield -m 0644 manifests/ephemeris.toml /etc/starfield-datastore/ephemeris.toml
+sudo install -o starfield -g starfield -m 0600 deploy/config.toml /etc/starfield-datastore/config.toml
 sudo install -o starfield -g starfield -m 0600 deploy/env.example /etc/starfield-datastore/env
 sudo install -m 0755 target/release/starfield-datastore /usr/local/bin/
 sudo install -m 0644 deploy/starfield-datastore.service deploy/starfield-datastore-mirror.service deploy/starfield-datastore-mirror.timer /etc/systemd/system/
-sudoedit /etc/starfield-datastore/env      # fill in bucket, bind address, region, tokens
+sudoedit /etc/starfield-datastore/config.toml  # bucket, region, bind; set manifest to /etc/starfield-datastore/ephemeris.toml
+sudoedit /etc/starfield-datastore/env          # optional environment-backed secrets
 sudo systemctl daemon-reload
 sudo systemctl enable --now starfield-datastore.service starfield-datastore-mirror.timer
 ```
@@ -135,6 +137,7 @@ starfield-datastore mirror \
 The unit files in `deploy/` run both: `starfield-datastore.service` is the
 server, `starfield-datastore-mirror.timer` fires the oneshot
 `starfield-datastore-mirror.service` nightly, and both read
+`/etc/starfield-datastore/config.toml` and an optional secret environment file
 `/etc/starfield-datastore/env` (see `deploy/env.example`). The units use
 `ProtectSystem=strict` with only the cache and config directories writable.
 
@@ -192,3 +195,83 @@ may be mid-read.
   becomes a read bottleneck.
 - No automatic eviction, no automatic repair, no resumable downloads
   (spec §16).
+
+## 10. Container image and one-file configuration
+
+Every push to `main` builds, tests, and publishes
+`ghcr.io/orbitalcommons/starfield-datastore`. Tags are `latest`, `main`, and
+`sha-<full-commit-sha>`. PRs build and smoke-test the image without publishing.
+Publication waits for the Rust test suite and the container smoke test. The
+image's source label links the package to this repository. GHCR initially
+creates private packages; authenticated users with package access can pull
+them. Package visibility can be changed in GitHub's package settings.
+
+The image includes the server, CLI, and pinned ephemeris manifest. It runs as
+UID/GID `10001:10001`, supports a read-only root filesystem, and stores all
+cache and verification scratch files in the mounted cache volume. It includes
+the env/basic/netrc credential sources and native AWS credentials; 1Password
+requires a custom image built with that feature and an installed `op` CLI.
+
+Copy `deploy/config.toml`, edit its bucket/region/bind settings, then run on a
+Linux host joined to the tailnet:
+
+```sh
+docker volume create starfield-cache
+docker run -d --name starfield-datastore --restart unless-stopped \
+  --network host --read-only \
+  --mount type=volume,src=starfield-cache,dst=/var/lib/starfield-datastore/cache \
+  --mount type=bind,src="$(pwd)/config.toml",dst=/etc/starfield-datastore/config.toml,readonly \
+  ghcr.io/orbitalcommons/starfield-datastore:latest
+```
+
+The default command selects `services.ephemeris` from that file. Use a tailnet
+bind address to serve remote clients; loopback is the safe example default.
+Host networking is intentional: the server refuses public binds, and binding
+to a container's loopback with ordinary `-p` forwarding is not sufficient.
+The host and container must make the config readable by UID 10001. Mount
+`/var/lib/starfield-datastore/.netrc` read-only with mode 0600 and that owner,
+or pass named secret variables with Docker `--env-file`. AWS uses its native
+chain: an instance role, mounted AWS profile, or AWS environment credentials.
+Never pass credentials as Docker build arguments.
+
+```sh
+# Use another service profile from the same file:
+docker run --rm --network host \
+  --mount type=volume,src=starfield-cache,dst=/var/lib/starfield-datastore/cache \
+  --mount type=bind,src="$(pwd)/config.toml",dst=/etc/starfield-datastore/config.toml,readonly \
+  ghcr.io/orbitalcommons/starfield-datastore:latest \
+  --config /etc/starfield-datastore/config.toml --service catalogs serve
+
+# Build the same image locally:
+docker build -t starfield-datastore:local .
+```
+
+For `mirror`, the manifest directory must be mounted writable: that command
+locks and atomically updates its pins. Point the service's `manifest` at the
+mounted copy, rather than the bundled `/usr/share` copy.
+
+The shared config has top-level cache settings, a `[[credentials]]` list, and
+`[services.<name>]` profiles. Credential types are `env` (`variable`), `basic`
+(`username`, `password_env`), `netrc`, and `onepassword` (`reference`). A host
+list explicitly authorizes that credential for each exact host; no wildcard
+or suffix matching occurs. Secrets are read only when that host is requested.
+1Password is invoked per request, so rotation is picked up without restart.
+
+A profile's `credentials = [names]` is an explicit selection with no ambient
+fallback; `[]` disables upstream credentials. Omit it to inherit the global
+configured/default chain. Different profiles can select different credentials
+for the same host; two recognized entries cannot claim one host in a single
+active selection. Unknown types are retained as `Unrecognized(serde_json::Value)`,
+skipped, and reported by name/type without logging their payload. Unknown
+payloads support JSON-compatible TOML values; datetime literals must be quoted
+as strings. Malformed known types and unknown credential references are errors.
+
+When profiles use different credentials for the same host, select one with
+`--service` or `DatastoreConfig::builder_for_service`. Plain `from_env()` uses
+the global selection and refuses ambiguous hosts rather than choosing an
+account implicitly.
+
+CLI flags override profile values. For region, flags override AWS environment
+variables, which override the profile. Existing cache-setting environment
+overrides still apply. Relative manifest/cache paths resolve beside the config
+file. Select profiles with `--service`; a sole profile is selected automatically.

@@ -8,12 +8,8 @@ Wants=network-online.target
 Type=simple
 User=starfield
 Group=starfield
-EnvironmentFile=/etc/starfield-datastore/env
-ExecStart=/usr/local/bin/starfield-datastore serve \
-  --manifest /etc/starfield-datastore/ephemeris.toml \
-  --bucket ${STARFIELD_BUCKET} \
-  --region ${AWS_REGION} \
-  --bind ${STARFIELD_BIND}
+EnvironmentFile=-/etc/starfield-datastore/env
+ExecStart=/usr/local/bin/starfield-datastore --config /etc/starfield-datastore/config.toml --service ephemeris serve
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
