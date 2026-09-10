@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
+#[cfg(feature = "mirror-s3")]
+use starfield_datastore::Datastore;
 use starfield_datastore::{
-    ArtifactKey, Datastore, DatastoreBuilder, DatastoreConfig, DatastoreError, Manifest, Result,
-    ServiceConfig,
+    ArtifactKey, DatastoreBuilder, DatastoreConfig, DatastoreError, Manifest, Result, ServiceConfig,
 };
 use std::path::PathBuf;
 #[cfg(feature = "mirror-s3")]
