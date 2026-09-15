@@ -1,6 +1,6 @@
 [package]
 name = "starfield-datastore"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 description = "Pull-through artifact cache with fail-closed validation, an S3 mirror served by presigned redirect, and a credential model that keeps upstream secrets in one place"
@@ -25,7 +25,7 @@ thiserror = "2"
 toml = "0.8"
 url = "2"
 zeroize = "1"
-indicatif = { version = "0.17", optional = true }
+indicatif = { version = "0.18", optional = true }
 aws-config = { version = "1.12.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"], optional = true }
 aws-sdk-s3 = { version = "1.146.0", default-features = false, features = ["rt-tokio", "default-https-client", "rustls"], optional = true }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "signal", "io-util", "macros"], optional = true }

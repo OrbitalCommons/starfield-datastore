@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 — 2026-09-15
+
+- Bump indicatif 0.17 → 0.18, replacing the unmaintained `number_prefix`
+  (RUSTSEC-2025-0119) with `unit-prefix` behind the `progress` feature. No
+  API change.
+
 ## 0.1.1 — 2026-09-10
 
 - Add one-file service profiles and lazy named credential sources, with
