@@ -1,8 +1,11 @@
 //! Tailnet ephemeris service. Upstream work runs on blocking threads, while
 //! artifact bytes flow directly from S3 to clients through presigned redirects.
+mod cache;
+#[cfg(test)]
+mod eviction_tests;
 use crate::{
     Artifact, ArtifactKey, ContentCheck, Datastore, DatastoreError, Manifest, MirrorObject,
-    PutOutcome, Result, S3Mirror,
+    PutOutcome, Result, S3Mirror, ServiceCachePolicy,
 };
 use axum::{
     extract::{Path, State},
@@ -37,25 +40,35 @@ impl ObjectStore for S3Mirror {
 
 struct Service {
     manifest: Manifest,
-    store: Datastore,
+    store: Arc<Datastore>,
     mirror: Box<dyn ObjectStore>,
     work: Arc<tokio::sync::Semaphore>,
+    fills: Arc<tokio::sync::Semaphore>,
+    cache: Option<Arc<cache::Coordinator>>,
 }
 
 impl Service {
-    fn resolve(&self, artifact: &Artifact) -> Result<(url::Url, MirrorObject)> {
+    fn head(&self, artifact: &Artifact) -> Result<Option<MirrorObject>> {
         if artifact.provenance.license.trim().is_empty() {
             return Err(DatastoreError::Manifest(format!(
                 "{} needs a license before redistribution",
                 artifact.key
             )));
         }
+        self.mirror.head(&artifact.key)
+    }
+
+    fn resolve_miss(&self, artifact: &Artifact, limit: Option<u64>) -> Result<MirrorObject> {
+        // Another fill may have uploaded while this request waited for work.
         let meta = match self.mirror.head(&artifact.key)? {
             Some(meta) => meta,
             None => {
                 // Upload explicitly even if get() serves a local hit. Client
                 // Datastore::get never writes to the mirror.
-                let path = self.store.get(artifact)?;
+                let path = match limit {
+                    Some(bytes) => self.store.get_limited(artifact, bytes)?,
+                    None => self.store.get(artifact)?,
+                };
                 let entry = self.store.entry(&artifact.key).ok_or_else(|| {
                     DatastoreError::Mirror("local entry disappeared before upload".into())
                 })?;
@@ -71,6 +84,14 @@ impl Service {
                 meta
             }
         };
+        Ok(meta)
+    }
+
+    fn redirect(
+        &self,
+        artifact: &Artifact,
+        meta: MirrorObject,
+    ) -> Result<(url::Url, MirrorObject)> {
         check_metadata(artifact, &meta)?;
         Ok((self.mirror.presign(&artifact.key)?, meta))
     }
@@ -112,11 +133,47 @@ async fn artifact(State(service): State<Arc<Service>>, Path(key): Path<String>) 
         Ok(permit) => permit,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let head_service = service.clone();
+    let head_artifact = artifact.clone();
+    let head = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        service.resolve(&artifact)
+        head_service
+            .head(&head_artifact)?
+            .map(|meta| head_service.redirect(&head_artifact, meta))
+            .transpose()
     })
     .await;
+    let result = match head {
+        Ok(Ok(Some(hit))) => Ok(Ok(hit)),
+        Ok(Ok(None)) => {
+            if let Some(cache) = &service.cache {
+                match cache.admit(artifact.expected_bytes) {
+                    Ok(guard) => {
+                        tokio::task::spawn_blocking(move || {
+                            let _guard = guard;
+                            let meta = service.resolve_miss(&artifact, Some(_guard.limit))?;
+                            service.redirect(&artifact, meta)
+                        })
+                        .await
+                    }
+                    Err(error) => Ok(Err(error)),
+                }
+            } else {
+                let permit = match service.fills.clone().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                };
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let meta = service.resolve_miss(&artifact, None)?;
+                    service.redirect(&artifact, meta)
+                })
+                .await
+            }
+        }
+        Ok(Err(error)) => Ok(Err(error)),
+        Err(error) => Err(error),
+    };
     match result {
         Ok(Ok((url, meta))) => {
             let Ok(location) = HeaderValue::from_str(url.as_str()) else {
@@ -136,6 +193,14 @@ async fn artifact(State(service): State<Arc<Service>>, Path(key): Path<String>) 
             response
         }
         Ok(Err(error)) => {
+            if matches!(error, DatastoreError::FillUnavailable(_)) {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, "1")],
+                    error.to_string(),
+                )
+                    .into_response();
+            }
             let status = if matches!(error, DatastoreError::ContentRejected { .. }) {
                 StatusCode::UNPROCESSABLE_ENTITY
             } else {
@@ -155,16 +220,36 @@ pub fn serve(
     mirror: S3Mirror,
     bind: SocketAddr,
 ) -> Result<()> {
+    serve_with_cache_policy(manifest, store, mirror, bind, None)
+}
+
+/// Serve with optional automatic maintenance of an exclusively server-owned
+/// cache directory. Never share this directory with library path consumers or
+/// other cache-mutating processes. The default policy does not evict.
+pub fn serve_with_cache_policy(
+    manifest: Manifest,
+    store: Datastore,
+    mirror: S3Mirror,
+    bind: SocketAddr,
+    policy: Option<ServiceCachePolicy>,
+) -> Result<()> {
     if !private_bind(bind.ip()) {
         return Err(DatastoreError::Config(
             "serve must bind loopback or a Tailscale address".into(),
         ));
     }
+    let store = Arc::new(store);
+    let cache = policy
+        .filter(|p| p.evict_on_fetch)
+        .map(|p| cache::Coordinator::new(store.clone(), p))
+        .transpose()?;
     let service = Arc::new(Service {
         manifest,
         store,
         mirror: Box::new(mirror),
         work: Arc::new(tokio::sync::Semaphore::new(8)),
+        fills: Arc::new(tokio::sync::Semaphore::new(8)),
+        cache,
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -249,12 +334,14 @@ mod tests {
             manifest: Manifest {
                 artifacts: vec![artifact],
             },
-            store,
+            store: Arc::new(store),
             mirror: Box::new(Fake {
                 object: Mutex::new(None),
                 writes: writes.clone(),
             }),
             work: Arc::new(tokio::sync::Semaphore::new(2)),
+            fills: Arc::new(tokio::sync::Semaphore::new(2)),
+            cache: None,
         });
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime

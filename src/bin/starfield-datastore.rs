@@ -266,12 +266,13 @@ fn run(args: Args) -> Result<()> {
             region,
             bind,
         } => {
-            starfield_datastore::server::serve(
+            starfield_datastore::server::serve_with_cache_policy(
                 Manifest::from_path(&settings.manifest(manifest)?)?,
                 upstream_store(&settings)?,
                 s3_target(&settings.bucket(bucket)?, settings.region(region))?,
                 bind.or(settings.profile.bind)
                     .unwrap_or_else(|| "127.0.0.1:8080".parse().unwrap()),
+                settings.profile.cache.clone(),
             )?;
         }
     }

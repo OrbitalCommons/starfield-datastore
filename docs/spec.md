@@ -860,3 +860,41 @@ Each step independently useful.
 | 2026-09-09 | Deferred, recorded: resumable `Range` downloads; leases protecting held paths from `gc`; hit-verification shortcuts. Not chosen: weakening TLS for any archive (the NSA archive's broken chain stays a documented escape hatch in `starfield-datasources`). |
 | 2026-09-10 | One config file adds a list of named credentials and named service profiles. Credential sources are typed (env, basic, netrc, onepassword); unknown types preserve raw `serde_json::Value`, are skipped, and produce a startup warning without their payload. Known malformed types remain errors. Secrets resolve per host at request time. A profile may select credentials explicitly without ambient fallback; different profiles may use different credentials for the same host. |
 | 2026-09-10 | Docker uses a non-root multistage image with a persistent cache volume and the same config file. Every main push publishes its tested image to GHCR under a full commit tag; main/latest identify the current main build. PRs build and smoke-test without publishing. Linux host networking preserves the existing loopback/tailnet-only bind rule. |
+| 2026-09-28 | Approved opt-in service-owned eviction with upfront byte reservations, streamed cumulative limits, and quiescent GC. Ordinary library consumers retain explicit-only GC. S3 hits bypass admission; fills retain protection through upload and disconnect. Zero retained budget supports staging-only mirror-fillers. |
+
+## 17. Service-owned cache maintenance
+
+`services.<name>.cache` optionally configures `evict_on_fetch` (default false),
+`max_bytes`, `max_concurrent_fills`, `max_artifact_bytes`,
+`max_inflight_bytes`, and `min_free_bytes`. Enabled file configuration requires
+an explicit cache directory. The additive `serve_with_cache_policy` entry
+point exposes the same policy; `serve` and library `get` remain non-evicting.
+
+The server exclusively owns this directory. A lifetime lock rejects a second
+managed server, but ordinary library or CLI users are not coordinated and
+must not share it. Startup runs existing GC and independently measures blob
+payload; failure aborts startup. Temporary crash files are reported, not removed.
+
+S3 HEAD/presign happens before admission. Cold fills reserve exact manifest
+bytes if available, otherwise the full artifact cap; size, concurrency,
+aggregate reservations and filesystem free space must all permit admission.
+Writes charge a cumulative budget before touching disk, including unsuccessful
+attempts. No capacity is refunded during retries or incremental growth.
+
+A fill guard lives in the blocking worker through upload and presign, including
+client disconnects. Any finishing guard closes admission atomically. Once all
+active guards drain, existing GC removes orphans then oldest-fetched keys, and
+an independent blob count must meet `max_bytes` before reservations are released.
+Thus concurrent fills cannot evict each other's paths, including shared blobs.
+A runtime cleanup error leaves cold admission closed until repair/restart.
+
+S3 hits use separate worker permits and bypass maintenance even after cleanup
+failure. Cold admission failure returns 503 and Retry-After; streamed size
+violations return 502. No implicit queue retains unlimited cold requests.
+
+The payload envelope is retained budget plus outstanding reservations, not a
+filesystem quota. Indexes, allocation overhead, crash leftovers and unrelated
+writers lie outside it. Admission checks free bytes against headroom plus all
+reservations, conservatively charging already-written bytes again. The root
+must be dedicated and sufficiently provisioned. `tmp/` remains untouched.
+See the deployment guide for sizing and acceptance checks.

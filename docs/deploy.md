@@ -176,13 +176,13 @@ local cache only. A CI job whose cache is already warm sets
 | Repair a corrupt local blob | `starfield-datastore verify --manifest M --repair` (removes the failed keys, refetches) |
 | Check the mirror | `starfield-datastore verify --manifest M --at s3://<bucket>/<prefix> --region <region>` (downloads and hashes every object; a HEAD is not a verification) |
 | Repair the mirror | `… --at s3://<bucket>/<prefix> --repair` (conditional on the observed ETag) |
-| Reclaim disk | `starfield-datastore gc --max-bytes N` (orphan blobs first, then oldest keys; never runs implicitly; never touches `tmp/`) |
+| Reclaim disk | `starfield-datastore gc --max-bytes N` (orphan blobs first, then oldest keys; explicit unless service policy enables it; never touches `tmp/`) |
 | See what is cached | `starfield-datastore list --bytes` |
 | Seed from a file already on disk | `starfield-datastore import --manifest M --key K --from PATH` (validated like a download; copies) |
 | Drop one key | `starfield-datastore remove --key K` (how a corrupt blob shared with a key the manifest does not know gets cleared; `verify` names every key referencing it) |
 | Crash leftovers | files in `<cache>/tmp/` older than any running transfer can be deleted by hand; `gc` never touches them |
 
-`gc` is explicit because consumers hold paths, and sometimes memory maps,
+By default, `gc` is explicit because consumers hold paths, and sometimes memory maps,
 into the cache. Do not schedule it on a host where a long-running consumer
 may be mid-read.
 
@@ -193,7 +193,7 @@ may be mid-read.
   wanted on the hop to the server.
 - No raw-S3 read path from the tailnet (spec §2.5). Add it only if the server
   becomes a read bottleneck.
-- No automatic eviction, no automatic repair, no resumable downloads
+- No automatic eviction for library clients, no automatic repair, no resumable downloads
   (spec §16).
 
 ## 10. Container image and one-file configuration
@@ -275,3 +275,62 @@ CLI flags override profile values. For region, flags override AWS environment
 variables, which override the profile. Existing cache-setting environment
 overrides still apply. Relative manifest/cache paths resolve beside the config
 file. Select profiles with `--service`; a sole profile is selected automatically.
+
+## 11. Bounded staging for mirror-filler services
+
+A mirror-filler redirects S3 hits without reading its local cache. Enable this
+policy only with an explicit `cache_dir` dedicated to one server:
+
+```toml
+[services.ephemeris.cache]
+evict_on_fetch = true
+max_bytes = 0
+max_concurrent_fills = 2
+max_artifact_bytes = 17179869184
+max_inflight_bytes = 34359738368
+min_free_bytes = 21474836480
+```
+
+All sizes are bytes: this example permits two 16 GiB reservations, retains no
+blob payload after cleanup, and checks 20 GiB of free-space headroom. An absent
+block or `evict_on_fetch = false` preserves explicit-only GC. Library `get()`
+never enables this policy. A nonzero `max_bytes` retains blobs for S3-miss
+reuploads, using existing GC ordering (orphans first, then oldest-fetched keys,
+not access LRU).
+
+Each cold fill reserves its manifest's exact size, or the full artifact cap
+when unknown. Writes enforce that reservation cumulatively across retries;
+Content-Length is not trusted for admission. Completed fills keep their
+reservations until cleanup. The first completion closes admission; all active
+fills keep their paths through upload, even if an HTTP client disconnects.
+After the last fill ends, GC runs and remeasures retained payload before
+reopening admission. S3 hits bypass this gate.
+
+Admission exhaustion, draining, or insufficient free space returns 503 with
+`Retry-After: 1`; catalog walkers must retry. Transfers exceeding the reserved
+limit return 502. Failed cleanup disables new fills until repair and restart,
+while S3-hit redirects continue. Startup cleans existing blobs to budget and
+fails if cleanup cannot complete. Logs report effective limits, existing
+`tmp/` bytes, and before/after blob counts.
+
+This bounds retained blob payload plus newly materialized payload to
+`max_bytes + max_inflight_bytes`, not total filesystem allocation. Indexes,
+allocation overhead, crash residue in `tmp/`, and unrelated writers are extra.
+Free-space admission is deliberately conservative and does not reserve space
+against other processes. Unknown-size Gaia shards reserve 16 GiB each in this
+example regardless of their usual size; raise concurrency only with sufficient
+reservation capacity or trustworthy manifest sizes. The 16 GiB limit admits
+the currently measured 12,746,799,164-byte Mars mosaic.
+
+The service holds a lifetime ownership lock excluding other managed servers.
+Ordinary CLI/library processes do not honor this lock: **do not run import,
+mirror, GC, repair, or path consumers against this live directory**. Stop the
+server before manual maintenance. GC never removes `tmp/`; inspect and remove
+crash residue only while all users of the directory are stopped.
+
+Roll out a digest-pinned image with the existing non-root UID, read-only root,
+and writable cache mount. Streaming needs no writable scratch outside that
+mount. The container smoke test uses a 1536 MiB memory limit. Before unblocking
+bulk pulls, confirm repeated fills return the cache to budget, oversized
+transfers fail cleanly, and an object independently confirmed present in S3
+still returns 302 after local eviction without another upstream request.
