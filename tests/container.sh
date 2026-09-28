@@ -18,6 +18,7 @@ docker run --rm --read-only -v "$volume:/var/lib/starfield-datastore/cache" "$im
 # Health and graceful shutdown need no AWS connection or archive credentials.
 chmod 755 "$scratch"
 cat > "$scratch/config.toml" <<'TOML'
+cache_dir = "/var/lib/starfield-datastore/cache"
 [[credentials]]
 name = "future"
 hosts = ["example.org"]
@@ -29,8 +30,16 @@ bucket = "s3://unused-smoke-bucket"
 region = "us-east-1"
 bind = "127.0.0.1:18080"
 credentials = ["future"]
+[services.smoke.cache]
+evict_on_fetch = true
+max_bytes = 0
+max_concurrent_fills = 2
+max_artifact_bytes = 1048576
+max_inflight_bytes = 2097152
+min_free_bytes = 0
 TOML
-docker run -d --name "$container" --network host --read-only \
+docker run -d --name "$container" --network host --read-only --memory 1536m \
+  --cap-drop ALL --security-opt no-new-privileges \
   -v "$volume:/var/lib/starfield-datastore/cache" \
   -v "$scratch:/run/sfd-smoke:ro" \
   -e AWS_EC2_METADATA_DISABLED=true \
@@ -45,5 +54,6 @@ curl --fail --silent http://127.0.0.1:18080/healthz > /dev/null
 logs=$(docker logs "$container" 2>&1)
 [[ "$logs" == *"future-auth"* && "$logs" == *"skipped"* ]]
 [[ "$logs" != *"do-not-log-this-payload"* ]]
+[[ "$logs" == *"managed cache:"* && "$logs" == *"after_bytes=0"* ]]
 docker stop --time 10 "$container" > /dev/null
 test "$(docker inspect -f '{{.State.ExitCode}}' "$container")" = 0

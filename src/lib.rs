@@ -27,7 +27,7 @@ mod store;
 
 pub use artifact::{Artifact, ArtifactKey, Freshness, Provenance, Source};
 pub use check::{CheckFailure, ContentCheck};
-pub use config::{DatastoreConfig, ServiceConfig};
+pub use config::{DatastoreConfig, ServiceCachePolicy, ServiceConfig};
 #[cfg(feature = "onepassword")]
 pub use credential::OnePasswordProvider;
 pub use credential::{

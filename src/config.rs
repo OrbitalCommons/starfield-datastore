@@ -41,6 +41,8 @@ pub struct DatastoreConfig {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
+    /// Optional server-only automatic cache maintenance. Absent means disabled.
+    pub cache: Option<ServiceCachePolicy>,
     pub manifest: Option<PathBuf>,
     pub bucket: Option<String>,
     pub region: Option<String>,
@@ -48,6 +50,48 @@ pub struct ServiceConfig {
     /// `None` inherits the configured/default chain. An explicit list selects
     /// only those named credentials, without ambient credential fallback.
     pub credentials: Option<Vec<String>>,
+}
+
+/// Resource limits for a server-owned cache; ordinary library gets are unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceCachePolicy {
+    /// Enable maintenance after fills drain. Defaults to false.
+    #[serde(default)]
+    pub evict_on_fetch: bool,
+    /// Quiescent unique-blob budget; zero makes this a staging-only cache.
+    pub max_bytes: u64,
+    /// Maximum number of simultaneous cold fills.
+    pub max_concurrent_fills: usize,
+    /// Maximum bytes materialized by a fill, including its retries.
+    pub max_artifact_bytes: u64,
+    /// Aggregate reservations, retained until maintenance finishes.
+    pub max_inflight_bytes: u64,
+    /// Required unreserved filesystem free space at admission.
+    pub min_free_bytes: u64,
+}
+
+impl ServiceCachePolicy {
+    /// Reject limits that cannot admit a maximum-sized artifact safely.
+    pub fn validate(&self) -> Result<()> {
+        if self.max_concurrent_fills == 0
+            || self.max_artifact_bytes == 0
+            || self.max_inflight_bytes < self.max_artifact_bytes
+            || self
+                .max_inflight_bytes
+                .checked_add(self.min_free_bytes)
+                .is_none()
+            || self
+                .max_inflight_bytes
+                .checked_add(self.max_bytes)
+                .is_none()
+        {
+            return Err(DatastoreError::Config(
+                "invalid service cache limits".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl DatastoreConfig {
@@ -145,6 +189,14 @@ impl DatastoreConfig {
             crate::credential_config::validate_entries(std::slice::from_ref(entry))?;
         }
         for (service_name, service) in &self.services {
+            if let Some(policy) = &service.cache {
+                policy.validate()?;
+                if policy.evict_on_fetch && self.cache_dir.is_none() {
+                    return Err(DatastoreError::Config(
+                        "automatic service eviction requires an explicit cache_dir".into(),
+                    ));
+                }
+            }
             if service_name.trim().is_empty() {
                 return Err(DatastoreError::Config("service name is empty".into()));
             }
@@ -327,6 +379,45 @@ pub(crate) fn parse_mirror(spec: &str, region: Option<String>) -> Result<Mirror>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_cache_is_explicit_and_rejects_unusable_limits() {
+        let raw = "cache_dir='/server/cache'\n[services.ephemeris.cache]\nevict_on_fetch=true\nmax_bytes=0\nmax_concurrent_fills=2\nmax_artifact_bytes=16\nmax_inflight_bytes=32\nmin_free_bytes=20\n";
+        let config = DatastoreConfig::from_toml_str(raw).unwrap();
+        let policy = config.services["ephemeris"].cache.as_ref().unwrap();
+        assert!(policy.evict_on_fetch);
+        assert_eq!(policy.max_bytes, 0);
+        assert!(
+            DatastoreConfig::from_toml_str(&raw.replace("cache_dir='/server/cache'\n", ""))
+                .is_err()
+        );
+        assert!(DatastoreConfig::from_toml_str(
+            &raw.replace("max_concurrent_fills=2", "max_concurrent_fills=0")
+        )
+        .is_err());
+        assert!(DatastoreConfig::from_toml_str(
+            &raw.replace("max_artifact_bytes=16", "max_artifact_bytes=0")
+        )
+        .is_err());
+        assert!(DatastoreConfig::from_toml_str(
+            &raw.replace("max_inflight_bytes=32", "max_inflight_bytes=8")
+        )
+        .is_err());
+        let disabled =
+            DatastoreConfig::from_toml_str(&raw.replace("evict_on_fetch=true\n", "")).unwrap();
+        assert!(
+            !disabled.services["ephemeris"]
+                .cache
+                .as_ref()
+                .unwrap()
+                .evict_on_fetch
+        );
+        let ordinary = DatastoreConfig::from_toml_str(
+            "cache_max=0\n[services.ephemeris]\nbind='127.0.0.1:8080'",
+        )
+        .unwrap();
+        assert!(ordinary.services["ephemeris"].cache.is_none());
+    }
 
     #[test]
     fn booleans_are_lenient_but_explicit() {

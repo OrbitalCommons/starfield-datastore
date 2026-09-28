@@ -35,6 +35,10 @@ pub enum DatastoreError {
     Mirror(String),
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("cold fill unavailable: {0}")]
+    FillUnavailable(String),
+    #[error("artifact transfer exceeds the reserved fill byte limit")]
+    TransferLimit,
     #[error("manifest error: {0}")]
     Manifest(String),
     #[error(transparent)]

@@ -23,6 +23,16 @@ region = "us-west-2"
 bind = "127.0.0.1:8080"
 credentials = ["earthdata", "mast"]
 
+# Optional: only for an exclusively server-owned cache directory.
+# Defaults to OFF. Zero retention removes uploaded blobs after all fills drain.
+# [services.ephemeris.cache]
+# evict_on_fetch = true
+# max_bytes = 0
+# max_concurrent_fills = 2
+# max_artifact_bytes = 17179869184 # 16 GiB, streamed limit including retries
+# max_inflight_bytes = 34359738368 # 32 GiB of outstanding reservations
+# min_free_bytes = 21474836480 # 20 GiB filesystem headroom
+
 # Add more profiles without introducing another configuration file:
 # [services.catalogs]
 # manifest = "/etc/starfield-datastore/catalogs.toml"

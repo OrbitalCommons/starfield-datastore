@@ -20,6 +20,7 @@ use crate::{
 use layout::{now_unix, Layout};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -236,12 +237,29 @@ impl Datastore {
 
     /// As `get`, reporting which layer served it.
     pub fn get_with_outcome(&self, artifact: &Artifact) -> Result<(PathBuf, ResolveOutcome)> {
+        self.get_with_budget(artifact, None)
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn get_limited(&self, artifact: &Artifact, bytes: u64) -> Result<PathBuf> {
+        self.get_with_budget(artifact, Some(&Cell::new(bytes)))
+            .map(|(path, _)| path)
+    }
+
+    fn get_with_budget(
+        &self,
+        artifact: &Artifact,
+        budget: Option<&Cell<u64>>,
+    ) -> Result<(PathBuf, ResolveOutcome)> {
         let start = Instant::now();
         let key = &artifact.key;
         let _lock = self.layout.lock(key)?;
 
         if let Some(entry) = self.layout.read_entry(key)? {
             if let Some(path) = self.local_hit(artifact, &entry)? {
+                if budget.is_some_and(|budget| entry.bytes > budget.get()) {
+                    return Err(DatastoreError::TransferLimit);
+                }
                 return Ok((path, outcome(Layer::LocalDisk, entry.bytes, start, None)));
             }
         }
@@ -251,12 +269,13 @@ impl Datastore {
 
         let mirror_reason = match &self.mirror {
             None => "no mirror configured".to_string(),
-            Some(mirror) => match self.fetch_from_mirror(artifact, mirror.as_ref()) {
+            Some(mirror) => match self.fetch_from_mirror(artifact, mirror.as_ref(), budget) {
                 Ok(Some((path, bytes))) => {
                     return Ok((path, outcome(Layer::Mirror, bytes, start, None)));
                 }
                 Ok(None) => format!("{} has no entry", mirror.location(key)),
                 Err(e @ DatastoreError::ContentRejected { .. }) => return Err(e),
+                Err(e @ DatastoreError::TransferLimit) => return Err(e),
                 Err(e) => e.to_string(),
             },
         };
@@ -275,10 +294,11 @@ impl Datastore {
 
         let mut attempts = Vec::with_capacity(artifact.sources.len());
         for (index, source) in artifact.sources.iter().enumerate() {
-            match self.fetch_from_upstream(artifact, index) {
+            match self.fetch_from_upstream(artifact, index, budget) {
                 Ok((path, bytes)) => {
                     return Ok((path, outcome(Layer::Upstream, bytes, start, Some(index))));
                 }
+                Err(e @ DatastoreError::TransferLimit) => return Err(e),
                 Err(
                     e @ (DatastoreError::ContentRejected { .. }
                     | DatastoreError::NoCredential { .. }
@@ -306,7 +326,7 @@ impl Datastore {
         let _lock = self.layout.lock(&artifact.key)?;
         let mut file = std::fs::File::open(path)?;
         let (tmp, digest, bytes) = self
-            .receive(artifact, |sink| {
+            .receive(artifact, None, |sink| {
                 std::io::copy(&mut file, sink)?;
                 Ok(true)
             })?
@@ -444,6 +464,21 @@ impl Datastore {
         Ok(removed)
     }
 
+    /// Unique blob payload bytes, including orphans. Caller must exclude fills
+    /// when using this to verify a maintenance budget.
+    #[cfg(feature = "server")]
+    pub(crate) fn blob_bytes(&self) -> Result<u64> {
+        let _store = self.layout.store_lock()?;
+        self.layout
+            .blobs()?
+            .iter()
+            .try_fold(0u64, |total, (_, bytes)| {
+                total
+                    .checked_add(*bytes)
+                    .ok_or_else(|| DatastoreError::Config("cache byte count overflow".into()))
+            })
+    }
+
     fn entries(&self) -> Result<Vec<(ArtifactKey, IndexEntry)>> {
         let mut out = Vec::new();
         for key in self.layout.keys()? {
@@ -503,9 +538,10 @@ impl Datastore {
         &self,
         artifact: &Artifact,
         mirror: &dyn MirrorRead,
+        budget: Option<&Cell<u64>>,
     ) -> Result<Option<(PathBuf, u64)>> {
         let Some((tmp, digest, bytes)) =
-            self.receive(artifact, |sink| mirror.fetch(&artifact.key, sink))?
+            self.receive(artifact, budget, |sink| mirror.fetch(&artifact.key, sink))?
         else {
             return Ok(None);
         };
@@ -515,10 +551,15 @@ impl Datastore {
         Ok(Some((path, bytes)))
     }
 
-    fn fetch_from_upstream(&self, artifact: &Artifact, index: usize) -> Result<(PathBuf, u64)> {
+    fn fetch_from_upstream(
+        &self,
+        artifact: &Artifact,
+        index: usize,
+        budget: Option<&Cell<u64>>,
+    ) -> Result<(PathBuf, u64)> {
         let source = &artifact.sources[index];
         let mut download = None;
-        let received = self.receive(artifact, |sink| {
+        let received = self.receive(artifact, budget, |sink| {
             download = self.fetcher.request(source, sink)?;
             Ok(download.is_some())
         })?;
@@ -540,6 +581,7 @@ impl Datastore {
     fn receive<F>(
         &self,
         artifact: &Artifact,
+        budget: Option<&Cell<u64>>,
         producer: F,
     ) -> Result<Option<(NamedTempFile, String, u64)>>
     where
@@ -547,7 +589,12 @@ impl Datastore {
     {
         let mut tmp = self.layout.tmp_file()?;
         let mut writer = Receiver::new(tmp.as_file_mut(), &artifact.check);
-        let served = match producer(&mut writer) {
+        writer.budget = budget;
+        let result = producer(&mut writer);
+        if writer.limit_exceeded {
+            return Err(DatastoreError::TransferLimit);
+        }
+        let served = match result {
             Ok(served) => served,
             Err(DatastoreError::Io(_)) if writer.rejected.is_some() => false,
             Err(e) => return Err(e),
@@ -676,6 +723,8 @@ struct Receiver<'a> {
     head: Vec<u8>,
     prefix_checked: bool,
     rejected: Option<CheckFailure>,
+    budget: Option<&'a Cell<u64>>,
+    limit_exceeded: bool,
 }
 
 impl<'a> Receiver<'a> {
@@ -688,6 +737,8 @@ impl<'a> Receiver<'a> {
             head: Vec::with_capacity(PREFIX_BYTES),
             prefix_checked: false,
             rejected: None,
+            budget: None,
+            limit_exceeded: false,
         }
     }
 
@@ -717,6 +768,16 @@ impl<'a> Receiver<'a> {
 
 impl Write for Receiver<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(budget) = self.budget {
+            let remaining = budget.get().checked_sub(buf.len() as u64);
+            if self.limit_exceeded || remaining.is_none() {
+                self.limit_exceeded = true;
+                return Err(std::io::Error::other("fill byte reservation exhausted"));
+            }
+            // Charge before writing; never refund on retry. This conservatively
+            // covers partial writes and blobs orphaned by publication failures.
+            budget.set(remaining.unwrap());
+        }
         if let Some(failure) = &self.rejected {
             return Err(std::io::Error::other(format!(
                 "{}: {}",
@@ -752,5 +813,70 @@ impl IndexEntry {
             provider_identity: None,
             layer,
         }
+    }
+}
+
+#[cfg(all(test, feature = "server"))]
+mod limited_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn cumulative_streaming_limit_covers_unknown_sizes_retries_and_wrapped_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Datastore::builder()
+            .cache_root(root.path().to_owned())
+            .build()
+            .unwrap();
+        let artifact = Artifact::new(ArtifactKey::new("large").unwrap(), vec![])
+            .with_check(ContentCheck::None);
+        let budget = Cell::new(10);
+        let first = store.receive(&artifact, Some(&budget), |sink| {
+            sink.write_all(b"123456")?;
+            Err(DatastoreError::Mirror("failed transfer".into()))
+        });
+        assert!(first.is_err());
+        assert_eq!(budget.get(), 4, "retries do not refund materialized bytes");
+        let second = store.receive(&artifact, Some(&budget), |sink| {
+            sink.write_all(b"789")?;
+            assert!(sink.write_all(b"xx").is_err());
+            // Fetchers can wrap the sink error. Still return the explicit limit error.
+            Err(DatastoreError::Mirror("wrapped write failure".into()))
+        });
+        assert!(matches!(second, Err(DatastoreError::TransferLimit)));
+        assert_eq!(budget.get(), 1);
+        assert_eq!(
+            std::fs::read_dir(root.path().join("tmp")).unwrap().count(),
+            0
+        );
+        assert_eq!(store.blob_bytes().unwrap(), 0);
+        let unbounded = store
+            .receive(&artifact, None, |sink| {
+                sink.write_all(&[0; 32])?;
+                Ok(true)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(unbounded.2, 32);
+    }
+
+    #[test]
+    fn local_hits_obey_fill_limit_but_normal_get_does_not_evict() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Datastore::builder()
+            .cache_root(root.path().to_owned())
+            .max_bytes(0)
+            .build()
+            .unwrap();
+        let artifact = Artifact::new(ArtifactKey::new("existing").unwrap(), vec![])
+            .with_check(ContentCheck::None);
+        let input = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(input.path(), b"payload").unwrap();
+        let path = store.import(&artifact, input.path()).unwrap();
+        assert!(matches!(
+            store.get_limited(&artifact, 6),
+            Err(DatastoreError::TransferLimit)
+        ));
+        assert_eq!(store.get(&artifact).unwrap(), path);
+        assert!(path.exists());
     }
 }

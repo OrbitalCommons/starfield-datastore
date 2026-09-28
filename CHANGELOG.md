@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 — 2026-09-28
+
+- Add opt-in server-owned cache maintenance with bounded cold-fill concurrency,
+  aggregate byte reservations, streamed transfer limits, and filesystem headroom.
+- Support staging-only serving (`max_bytes = 0`): reclaim local blobs after all
+  active fills finish uploading, while continuing S3 redirects after eviction.
+- Keep ordinary library gets and default server operation free of automatic
+  eviction. Leave temporary crash residue untouched.
+- Return retryable 503 responses for cold-fill backpressure; keep S3-hit work
+  independent. Retain fill protection after HTTP disconnects and on error paths.
+- Add service-root ownership locking, startup/maintenance diagnostics, and
+  fail-closed cold-fill admission after maintenance errors.
+
 ## 0.1.2 — 2026-09-15
 
 - Bump indicatif 0.17 → 0.18, replacing the unmaintained `number_prefix`
