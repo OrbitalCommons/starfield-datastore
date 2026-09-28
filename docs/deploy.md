@@ -306,12 +306,22 @@ fills keep their paths through upload, even if an HTTP client disconnects.
 After the last fill ends, GC runs and remeasures retained payload before
 reopening admission. S3 hits bypass this gate.
 
+This is a drain barrier, not a rolling concurrency window: once either of two
+fills finishes, its slot stays idle until its peer finishes and GC completes.
+Throughput therefore follows batches gated by their slowest fill. Increasing
+concurrency increases batch size and reserved disk demand, not pipelining;
+do not assume linear speedup.
+
 Admission exhaustion, draining, or insufficient free space returns 503 with
 `Retry-After: 1`; catalog walkers must retry. Transfers exceeding the reserved
 limit return 502. Failed cleanup disables new fills until repair and restart,
 while S3-hit redirects continue. Startup cleans existing blobs to budget and
 fails if cleanup cannot complete. Logs report effective limits, existing
 `tmp/` bytes, and before/after blob counts.
+With `max_bytes = 0`, the first startup deletes all pre-existing local blobs,
+including objects not yet uploaded to S3. Confirm their S3 presence or preserve
+needed local-only data before enabling the policy. Datastore construction
+creates `blobs/`, `index/`, `locks/`, and `tmp/` on a fresh writable cache mount.
 
 This bounds retained blob payload plus newly materialized payload to
 `max_bytes + max_inflight_bytes`, not total filesystem allocation. Indexes,

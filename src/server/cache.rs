@@ -75,7 +75,7 @@ impl Coordinator {
         let mut state = self
             .state
             .try_lock()
-            .map_err(|_| unavailable("cache maintenance in progress"))?;
+            .map_err(|_| unavailable("admission busy; retry"))?;
         if let Some(reason) = &state.failed {
             return Err(unavailable(format!(
                 "maintenance failed; repair and restart: {reason}"
